@@ -94,3 +94,33 @@ local recipe = {
 }
 
 data:extend({ chest, item, recipe })
+
+-- =============================================================================
+-- PLAYTEST RECIPES — REMOVE BEFORE PUBLISHING
+-- =============================================================================
+-- Cheap (1 iron plate) recipes so we can spawn the auto-loader chest and a
+-- vanilla gun-turret right at the start of the game for early-game playtesting.
+-- The vanilla recipes are untouched; deleting this block (and the matching
+-- [PLAYTEST] locale entries in locale/en/loader.cfg) is enough to revert.
+-- =============================================================================
+data:extend({
+  {
+    type = "recipe",
+    name = "playtest-auto-loader-chest",
+    enabled = true,
+    energy_required = 0.5,
+    ingredients = { { type = "item", name = "iron-plate", amount = 1 } },
+    results     = { { type = "item", name = "auto-loader-chest", amount = 1 } },
+  },
+  {
+    type = "recipe",
+    name = "playtest-gun-turret",
+    enabled = true,
+    energy_required = 0.5,
+    ingredients = { { type = "item", name = "iron-plate", amount = 1 } },
+    results     = { { type = "item", name = "gun-turret", amount = 1 } },
+  },
+})
+-- =============================================================================
+-- END PLAYTEST RECIPES
+-- =============================================================================

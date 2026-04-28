@@ -12,7 +12,7 @@ data:extend({
     type = "int-setting",
     name = "auto-loader-chest-tick-interval",
     setting_type = "runtime-global",
-    default_value = 15,
+    default_value = 1,
     minimum_value = 1,
     maximum_value = 600,
     order = "b",
