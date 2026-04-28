@@ -17,6 +17,31 @@ local AMMO_INVENTORY = {
   ["character"]        = defines.inventory.character_ammo,
 }
 
+-- Entity types whose prototype defines automated_ammo_count (the natural
+-- "insert this many rounds" value vanilla inserters use). Other types
+-- (character, car, spider-vehicle) have no such prototype field and fall
+-- back to default_max_insert.
+local AMMO_COUNT_TYPES = {
+  ["ammo-turret"]      = true,
+  ["artillery-turret"] = true,
+  ["artillery-wagon"]  = true,
+}
+
+local ammo_count_cache = {}
+
+local function prototype_ammo_cap(entity)
+  if not AMMO_COUNT_TYPES[entity.type] then return nil end
+  local name = entity.name
+  local cached = ammo_count_cache[name]
+  if cached ~= nil then
+    if cached == false then return nil end
+    return cached
+  end
+  local count = entity.prototype.automated_ammo_count
+  ammo_count_cache[name] = count or false
+  return count
+end
+
 -- Coarse pre-filter for find_entities_filtered and the built-event filter.
 -- The precise capability test happens inside try_register_consumer.
 local CONSUMER_TYPES = {
@@ -155,7 +180,7 @@ local function clear_surface(surface_index)
   end
 end
 
-local function fill_one_inventory(consumer_inv, surface_chests)
+local function fill_one_inventory(consumer_inv, surface_chests, base_cap)
   if not consumer_inv or consumer_inv.is_full() then return end
   for _, chest in pairs(surface_chests) do
     if chest.valid then
@@ -163,7 +188,7 @@ local function fill_one_inventory(consumer_inv, surface_chests)
       if chest_inv and not chest_inv.is_empty() then
         for _, stack in ipairs(chest_inv.get_contents()) do
           local quality = stack.quality or "normal"
-          local cap = max_insert_overrides[stack.name] or default_max_insert
+          local cap = max_insert_overrides[stack.name] or base_cap
           if cap > 0 then
             local current = consumer_inv.get_item_count{ name = stack.name, quality = quality }
             local want = cap - current
@@ -186,11 +211,14 @@ end
 
 local function fill_consumer(entity, surface_chests)
   local fuel_inv = entity.get_fuel_inventory()
-  if fuel_inv then fill_one_inventory(fuel_inv, surface_chests) end
+  if fuel_inv then fill_one_inventory(fuel_inv, surface_chests, default_max_insert) end
 
   local idx = AMMO_INVENTORY[entity.type]
   local ammo_inv = idx and entity.get_inventory(idx)
-  if ammo_inv then fill_one_inventory(ammo_inv, surface_chests) end
+  if ammo_inv then
+    local cap = prototype_ammo_cap(entity) or default_max_insert
+    fill_one_inventory(ammo_inv, surface_chests, cap)
+  end
 end
 
 local function on_step()
