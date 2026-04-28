@@ -24,9 +24,11 @@ Restart Factorio. The chest's recipe is enabled by default — craft it from
 | Setting | Default | Range | Effect |
 | --- | --- | --- | --- |
 | `auto-loader-chest-batch-size` | 10 | 1–1000 | Consumer entities processed per step. Higher = faster top-ups, slightly more UPS. |
-| `auto-loader-chest-tick-interval` | 15 | 1–600 | Ticks between processing steps. Higher = lower UPS, slower top-ups. |
+| `auto-loader-chest-tick-interval` | 1 | 1–600 | Ticks between processing steps. Higher = lower UPS, slower top-ups. |
+| `auto-loader-chest-default-max-insert` | 10 | 0–100000 | Default cap on items kept loaded in a consumer (per item, per quality). 0 disables loading any item without an explicit override. |
+| `auto-loader-chest-insert-overrides` | `nuclear-fuel=1,uranium-fuel-cell=1` | string | Per-item overrides, comma-separated `item=count` pairs. Example: `coal=50,nutrients=100,nuclear-fuel=1`. |
 
-Both are runtime-global, so they can be changed mid-game from **Settings → Mod
+All are runtime-global, so they can be changed mid-game from **Settings → Mod
 settings → Map**.
 
 ## Supported entities

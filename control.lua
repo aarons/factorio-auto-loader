@@ -5,6 +5,8 @@
 local batch_size
 local tick_interval
 local current_nth_tick
+local default_max_insert
+local max_insert_overrides = {}
 
 local AMMO_INVENTORY = {
   ["ammo-turret"]      = defines.inventory.turret_ammo,
@@ -160,11 +162,20 @@ local function fill_one_inventory(consumer_inv, surface_chests)
       local chest_inv = chest.get_inventory(defines.inventory.chest)
       if chest_inv and not chest_inv.is_empty() then
         for _, stack in ipairs(chest_inv.get_contents()) do
-          local inserted = consumer_inv.insert{
-            name = stack.name, count = stack.count, quality = stack.quality,
-          }
-          if inserted > 0 then
-            chest_inv.remove{ name = stack.name, count = inserted, quality = stack.quality }
+          local quality = stack.quality or "normal"
+          local cap = max_insert_overrides[stack.name] or default_max_insert
+          if cap > 0 then
+            local current = consumer_inv.get_item_count{ name = stack.name, quality = quality }
+            local want = cap - current
+            if want > 0 then
+              local to_insert = stack.count < want and stack.count or want
+              local inserted = consumer_inv.insert{
+                name = stack.name, count = to_insert, quality = quality,
+              }
+              if inserted > 0 then
+                chest_inv.remove{ name = stack.name, count = inserted, quality = quality }
+              end
+            end
           end
           if consumer_inv.is_full() then return end
         end
@@ -230,9 +241,23 @@ local function on_step()
   end
 end
 
+local function parse_overrides(s)
+  local result = {}
+  if not s or s == "" then return result end
+  for entry in string.gmatch(s, "[^,]+") do
+    local name, count = string.match(entry, "^%s*([%w%-_]+)%s*=%s*(%d+)%s*$")
+    if name and count then
+      result[name] = tonumber(count)
+    end
+  end
+  return result
+end
+
 local function refresh_settings()
   batch_size    = settings.global["auto-loader-chest-batch-size"].value
   tick_interval = settings.global["auto-loader-chest-tick-interval"].value
+  default_max_insert    = settings.global["auto-loader-chest-default-max-insert"].value
+  max_insert_overrides  = parse_overrides(settings.global["auto-loader-chest-insert-overrides"].value)
 end
 
 local function reapply_on_nth_tick()
@@ -276,7 +301,10 @@ end)
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   if event.setting_type ~= "runtime-global" then return end
   local name = event.setting
-  if name == "auto-loader-chest-batch-size" or name == "auto-loader-chest-tick-interval" then
+  if name == "auto-loader-chest-batch-size"
+     or name == "auto-loader-chest-tick-interval"
+     or name == "auto-loader-chest-default-max-insert"
+     or name == "auto-loader-chest-insert-overrides" then
     refresh_settings()
     reapply_on_nth_tick()
   end

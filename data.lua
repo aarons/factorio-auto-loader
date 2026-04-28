@@ -23,25 +23,14 @@ local function apply_tint_to_sprite(sprite)
   end
 end
 
-local source = data.raw["logistic-container"]["active-provider-chest"]
+local source = data.raw["container"]["steel-chest"]
 if not source then
-  error("auto-loader-chest: vanilla active-provider-chest prototype not found")
+  error("auto-loader-chest: vanilla steel-chest prototype not found")
 end
 
 local chest = table.deepcopy(source)
-chest.type = "container"
 chest.name = "auto-loader-chest"
 chest.minable = { mining_time = 0.2, result = "auto-loader-chest" }
-
-chest.logistic_mode = nil
-chest.max_logistic_slots = nil
-chest.render_not_in_network_icon = nil
-chest.opened_duration = nil
-chest.trash_inventory_size = nil
-chest.animation = nil
-chest.animation_sound = nil
-chest.landing_location_offset = nil
-chest.use_exact_mode = nil
 
 if chest.picture then
   apply_tint_to_sprite(chest.picture)

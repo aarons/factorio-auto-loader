@@ -17,4 +17,21 @@ data:extend({
     maximum_value = 600,
     order = "b",
   },
+  {
+    type = "int-setting",
+    name = "auto-loader-chest-default-max-insert",
+    setting_type = "runtime-global",
+    default_value = 10,
+    minimum_value = 0,
+    maximum_value = 100000,
+    order = "c",
+  },
+  {
+    type = "string-setting",
+    name = "auto-loader-chest-insert-overrides",
+    setting_type = "runtime-global",
+    default_value = "nuclear-fuel=1,uranium-fuel-cell=1",
+    allow_blank = true,
+    order = "d",
+  },
 })
