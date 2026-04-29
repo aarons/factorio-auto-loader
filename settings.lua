@@ -1,5 +1,21 @@
 data:extend({
   {
+    type = "string-setting",
+    name = "auto-loader-chest-cost",
+    setting_type = "startup",
+    default_value = "normal",
+    allowed_values = { "cheat", "easy", "normal", "expensive" },
+    order = "a",
+  },
+  {
+    type = "string-setting",
+    name = "auto-loader-chest-availability",
+    setting_type = "startup",
+    default_value = "normal",
+    allowed_values = { "cheat", "easy", "normal", "hard" },
+    order = "b",
+  },
+  {
     type = "int-setting",
     name = "auto-loader-chest-batch-size",
     setting_type = "runtime-global",

@@ -23,6 +23,30 @@ local function apply_tint_to_sprite(sprite)
   end
 end
 
+local cost         = settings.startup["auto-loader-chest-cost"].value
+local availability = settings.startup["auto-loader-chest-availability"].value
+
+local INGREDIENTS_BY_COST = {
+  cheat     = { { type = "item", name = "iron-plate", amount = 1 } },
+  easy      = { { type = "item", name = "iron-plate", amount = 8 } },
+  normal    = {
+    { type = "item", name = "steel-chest",        amount = 1 },
+    { type = "item", name = "electronic-circuit", amount = 3 },
+    { type = "item", name = "advanced-circuit",   amount = 1 },
+  },
+  expensive = {
+    { type = "item", name = "steel-chest",        amount = 1 },
+    { type = "item", name = "electronic-circuit", amount = 3 },
+    { type = "item", name = "advanced-circuit",   amount = 1 },
+  },
+}
+
+local TECH_BY_AVAILABILITY = {
+  easy   = "electronics",
+  normal = "construction-robotics",
+  hard   = "logistic-robotics",
+}
+
 local source = data.raw["container"]["steel-chest"]
 if not source then
   error("auto-loader-chest: vanilla steel-chest prototype not found")
@@ -71,12 +95,9 @@ local item = {
 local recipe = {
   type = "recipe",
   name = "auto-loader-chest",
-  enabled = true,
+  enabled = (availability == "cheat"),
   energy_required = 0.5,
-  ingredients = {
-    { type = "item", name = "iron-chest", amount = 1 },
-    { type = "item", name = "electronic-circuit", amount = 2 },
-  },
+  ingredients = INGREDIENTS_BY_COST[cost],
   results = {
     { type = "item", name = "auto-loader-chest", amount = 1 },
   },
@@ -84,32 +105,11 @@ local recipe = {
 
 data:extend({ chest, item, recipe })
 
--- =============================================================================
--- PLAYTEST RECIPES — REMOVE BEFORE PUBLISHING
--- =============================================================================
--- Cheap (1 iron plate) recipes so we can spawn the auto-loader chest and a
--- vanilla gun-turret right at the start of the game for early-game playtesting.
--- The vanilla recipes are untouched; deleting this block (and the matching
--- [PLAYTEST] locale entries in locale/en/loader.cfg) is enough to revert.
--- =============================================================================
-data:extend({
-  {
-    type = "recipe",
-    name = "playtest-auto-loader-chest",
-    enabled = true,
-    energy_required = 0.5,
-    ingredients = { { type = "item", name = "iron-plate", amount = 1 } },
-    results     = { { type = "item", name = "auto-loader-chest", amount = 1 } },
-  },
-  {
-    type = "recipe",
-    name = "playtest-gun-turret",
-    enabled = true,
-    energy_required = 0.5,
-    ingredients = { { type = "item", name = "iron-plate", amount = 1 } },
-    results     = { { type = "item", name = "gun-turret", amount = 1 } },
-  },
-})
--- =============================================================================
--- END PLAYTEST RECIPES
--- =============================================================================
+local tech_name = TECH_BY_AVAILABILITY[availability]
+if tech_name then
+  local tech = data.raw.technology[tech_name]
+  if tech then
+    tech.effects = tech.effects or {}
+    table.insert(tech.effects, { type = "unlock-recipe", recipe = "auto-loader-chest" })
+  end
+end
