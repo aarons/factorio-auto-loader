@@ -25,8 +25,9 @@ Restart Factorio. The chest's recipe is enabled by default — craft it from
 | --- | --- | --- | --- |
 | `auto-loader-chest-batch-size` | 10 | 1–1000 | Consumer entities processed per step. Higher = faster top-ups, slightly more UPS. |
 | `auto-loader-chest-tick-interval` | 1 | 1–600 | Ticks between processing steps. Higher = lower UPS, slower top-ups. |
-| `auto-loader-chest-default-max-insert` | 10 | 0–100000 | Default cap on items kept loaded in a consumer (per item, per quality). 0 disables loading any item without an explicit override. |
-| `auto-loader-chest-insert-overrides` | `nuclear-fuel=1,uranium-fuel-cell=1` | string | Per-item overrides, comma-separated `item=count` pairs. Example: `coal=50,nutrients=100,nuclear-fuel=1`. |
+| `auto-loader-chest-max-fill` | 10 | 1–1000 | How many of each item (per quality) to load into a consumer. Replaces the game's own defaults entirely. |
+| `auto-loader-chest-refill-trigger` | 4 | 0–999 | Refill triggers once a consumer has this many or fewer of an item, then it fills back to the max. Clamped to one less than the cap if it would otherwise meet or exceed it. Stack-size-1 items (nuclear fuel, uranium fuel cells) ignore the trigger and always refill. |
+| `auto-loader-chest-insert-overrides` | `nuclear-fuel=1,uranium-fuel-cell=1` | string | Per-item max overrides, comma-separated `item=count` pairs. Example: `coal=50,nutrients=100,nuclear-fuel=1`. |
 
 All are runtime-global, so they can be changed mid-game from **Settings → Mod
 settings → Map**.

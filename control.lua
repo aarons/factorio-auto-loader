@@ -5,7 +5,8 @@
 local batch_size
 local tick_interval
 local current_nth_tick
-local default_max_insert
+local max_fill
+local refill_trigger
 local max_insert_overrides = {}
 
 local AMMO_INVENTORY = {
@@ -17,29 +18,18 @@ local AMMO_INVENTORY = {
   ["character"]        = defines.inventory.character_ammo,
 }
 
--- Entity types whose prototype defines automated_ammo_count (the natural
--- "insert this many rounds" value vanilla inserters use). Other types
--- (character, car, spider-vehicle) have no such prototype field and fall
--- back to default_max_insert.
-local AMMO_COUNT_TYPES = {
-  ["ammo-turret"]      = true,
-  ["artillery-turret"] = true,
-  ["artillery-wagon"]  = true,
-}
+-- Items whose stack size is 1 (e.g. nuclear fuel, uranium fuel cells) bypass
+-- the refill trigger, since "refill when 4 or fewer" doesn't make sense when
+-- you can only ever hold one of them per slot.
+local stack_size_cache = {}
 
-local ammo_count_cache = {}
-
-local function prototype_ammo_cap(entity)
-  if not AMMO_COUNT_TYPES[entity.type] then return nil end
-  local name = entity.name
-  local cached = ammo_count_cache[name]
-  if cached ~= nil then
-    if cached == false then return nil end
-    return cached
-  end
-  local count = entity.prototype.automated_ammo_count
-  ammo_count_cache[name] = count or false
-  return count
+local function get_stack_size(name)
+  local cached = stack_size_cache[name]
+  if cached then return cached end
+  local proto = prototypes.item[name]
+  local size = proto and proto.stack_size or 1
+  stack_size_cache[name] = size
+  return size
 end
 
 -- Coarse pre-filter for find_entities_filtered and the built-event filter.
@@ -180,7 +170,7 @@ local function clear_surface(surface_index)
   end
 end
 
-local function fill_one_inventory(consumer_inv, surface_chests, base_cap)
+local function fill_one_inventory(consumer_inv, surface_chests)
   if not consumer_inv or consumer_inv.is_full() then return end
   for _, chest in pairs(surface_chests) do
     if chest.valid then
@@ -188,17 +178,23 @@ local function fill_one_inventory(consumer_inv, surface_chests, base_cap)
       if chest_inv and not chest_inv.is_empty() then
         for _, stack in ipairs(chest_inv.get_contents()) do
           local quality = stack.quality or "normal"
-          local cap = max_insert_overrides[stack.name] or base_cap
+          local cap = max_insert_overrides[stack.name] or max_fill
           if cap > 0 then
+            -- Clamp the trigger so it never matches or exceeds the cap; if
+            -- they were equal we'd refill on a full inventory and loop.
+            local trigger = refill_trigger
+            if trigger >= cap then trigger = cap - 1 end
             local current = consumer_inv.get_item_count{ name = stack.name, quality = quality }
-            local want = cap - current
-            if want > 0 then
-              local to_insert = stack.count < want and stack.count or want
-              local inserted = consumer_inv.insert{
-                name = stack.name, count = to_insert, quality = quality,
-              }
-              if inserted > 0 then
-                chest_inv.remove{ name = stack.name, count = inserted, quality = quality }
+            if current <= trigger or get_stack_size(stack.name) == 1 then
+              local want = cap - current
+              if want > 0 then
+                local to_insert = stack.count < want and stack.count or want
+                local inserted = consumer_inv.insert{
+                  name = stack.name, count = to_insert, quality = quality,
+                }
+                if inserted > 0 then
+                  chest_inv.remove{ name = stack.name, count = inserted, quality = quality }
+                end
               end
             end
           end
@@ -211,14 +207,11 @@ end
 
 local function fill_consumer(entity, surface_chests)
   local fuel_inv = entity.get_fuel_inventory()
-  if fuel_inv then fill_one_inventory(fuel_inv, surface_chests, default_max_insert) end
+  if fuel_inv then fill_one_inventory(fuel_inv, surface_chests) end
 
   local idx = AMMO_INVENTORY[entity.type]
   local ammo_inv = idx and entity.get_inventory(idx)
-  if ammo_inv then
-    local cap = prototype_ammo_cap(entity) or default_max_insert
-    fill_one_inventory(ammo_inv, surface_chests, cap)
-  end
+  if ammo_inv then fill_one_inventory(ammo_inv, surface_chests) end
 end
 
 local function on_step()
@@ -284,7 +277,8 @@ end
 local function refresh_settings()
   batch_size    = settings.global["auto-loader-chest-batch-size"].value
   tick_interval = settings.global["auto-loader-chest-tick-interval"].value
-  default_max_insert    = settings.global["auto-loader-chest-default-max-insert"].value
+  max_fill              = settings.global["auto-loader-chest-max-fill"].value
+  refill_trigger        = settings.global["auto-loader-chest-refill-trigger"].value
   max_insert_overrides  = parse_overrides(settings.global["auto-loader-chest-insert-overrides"].value)
 end
 
@@ -331,7 +325,8 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   local name = event.setting
   if name == "auto-loader-chest-batch-size"
      or name == "auto-loader-chest-tick-interval"
-     or name == "auto-loader-chest-default-max-insert"
+     or name == "auto-loader-chest-max-fill"
+     or name == "auto-loader-chest-refill-trigger"
      or name == "auto-loader-chest-insert-overrides" then
     refresh_settings()
     reapply_on_nth_tick()

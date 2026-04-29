@@ -35,12 +35,21 @@ data:extend({
   },
   {
     type = "int-setting",
-    name = "auto-loader-chest-default-max-insert",
+    name = "auto-loader-chest-max-fill",
     setting_type = "runtime-global",
     default_value = 10,
-    minimum_value = 0,
-    maximum_value = 100000,
+    minimum_value = 1,
+    maximum_value = 1000,
     order = "c",
+  },
+  {
+    type = "int-setting",
+    name = "auto-loader-chest-refill-trigger",
+    setting_type = "runtime-global",
+    default_value = 4,
+    minimum_value = 0,
+    maximum_value = 999,
+    order = "d",
   },
   {
     type = "string-setting",
@@ -48,6 +57,6 @@ data:extend({
     setting_type = "runtime-global",
     default_value = "nuclear-fuel=1,uranium-fuel-cell=1",
     allow_blank = true,
-    order = "d",
+    order = "e",
   },
 })
