@@ -32,40 +32,28 @@ local function get_stack_size(name)
   return size
 end
 
--- Coarse pre-filter for find_entities_filtered and the built-event filter.
--- The precise capability test happens inside try_register_consumer.
-local CONSUMER_TYPES = {
-  "ammo-turret",
-  "artillery-turret",
-  "artillery-wagon",
-  "car",
-  "spider-vehicle",
-  "character",
-  "locomotive",
-  "cargo-wagon",
-  "mining-drill",
-  "furnace",
-  "boiler",
-  "reactor",
-  "inserter",
-  "assembling-machine",
-  "burner-generator",
-}
-
 local CHEST_NAME = "auto-loader-chest"
 
-local built_filter = {}
-for _, t in ipairs(CONSUMER_TYPES) do
-  built_filter[#built_filter + 1] = { filter = "type", type = t }
-end
-built_filter[#built_filter + 1] = { filter = "name", name = CHEST_NAME }
+-- Fraction of the per-step batch budget reserved for the rescan true-up.
+-- The fill loop gets the remainder. With batch_size=10 → 7 fills per surface
+-- + 3 rescan actions per step.
+local RESCAN_BUDGET_RATIO = 0.3
 
 local function reset_storage()
-  storage.chests_by_surface = {}
-  storage.consumer_queue    = {}
-  storage.consumer_cursor   = {}
-  storage.consumers         = {}
-  storage.destroy_registry  = {}
+  storage.chests_by_surface         = {}
+  storage.consumer_queue            = {}
+  storage.consumer_cursor           = {}
+  storage.consumers                 = {}
+  storage.destroy_registry          = {}
+  storage.known_consumer_names      = {}
+  storage.consumer_count_by_surface = {}
+  storage.rescan = {
+    surface_indices  = nil,
+    next_surface_pos = 1,
+    current_surface  = nil,
+    entities         = nil,
+    cursor           = 1,
+  }
 end
 
 local function init_surface(surface_index)
@@ -77,6 +65,9 @@ local function init_surface(surface_index)
   end
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
+  end
+  if not storage.consumer_count_by_surface[surface_index] then
+    storage.consumer_count_by_surface[surface_index] = 0
   end
 end
 
@@ -112,6 +103,9 @@ local function try_register_consumer(entity)
   local queue = storage.consumer_queue[surface_index]
   queue[#queue + 1] = unit_number
   storage.consumers[unit_number] = entity
+  storage.known_consumer_names[entity.name] = true
+  storage.consumer_count_by_surface[surface_index] =
+    storage.consumer_count_by_surface[surface_index] + 1
   local reg_num = script.register_on_object_destroyed(entity)
   storage.destroy_registry[reg_num] = {
     unit_number   = unit_number,
@@ -129,6 +123,10 @@ local function unregister_destroyed(reg_num)
     if chests then chests[entry.unit_number] = nil end
   else
     storage.consumers[entry.unit_number] = nil
+    local count_map = storage.consumer_count_by_surface
+    if count_map[entry.surface_index] then
+      count_map[entry.surface_index] = count_map[entry.surface_index] - 1
+    end
     -- Queue entry is left orphaned on purpose; chunk C compacts during
     -- the tick loop. Rewriting the array here would be O(n) per removal.
   end
@@ -160,13 +158,20 @@ local function clear_surface(surface_index)
       end
     end
   end
-  storage.chests_by_surface[surface_index] = nil
-  storage.consumer_queue[surface_index]    = nil
-  storage.consumer_cursor[surface_index]   = nil
+  storage.chests_by_surface[surface_index]         = nil
+  storage.consumer_queue[surface_index]            = nil
+  storage.consumer_cursor[surface_index]           = nil
+  storage.consumer_count_by_surface[surface_index] = nil
   for reg_num, entry in pairs(storage.destroy_registry) do
     if entry.surface_index == surface_index then
       storage.destroy_registry[reg_num] = nil
     end
+  end
+  local rescan = storage.rescan
+  if rescan and rescan.current_surface == surface_index then
+    rescan.current_surface = nil
+    rescan.entities        = nil
+    rescan.cursor          = 1
   end
 end
 
@@ -214,7 +219,83 @@ local function fill_consumer(entity, surface_chests)
   if ammo_inv then fill_one_inventory(ammo_inv, surface_chests) end
 end
 
+local function get_known_names_array()
+  local arr = {}
+  for name in pairs(storage.known_consumer_names) do
+    arr[#arr + 1] = name
+  end
+  return arr
+end
+
+-- Round-robin: advance to the next surface in the cached order, rebuilding
+-- the order list when we've cycled through it.
+local function pick_next_surface(rescan)
+  if not rescan.surface_indices or rescan.next_surface_pos > #rescan.surface_indices then
+    rescan.surface_indices = {}
+    for _, surface in pairs(game.surfaces) do
+      rescan.surface_indices[#rescan.surface_indices + 1] = surface.index
+    end
+    rescan.next_surface_pos = 1
+  end
+  if #rescan.surface_indices == 0 then return nil end
+  local idx = rescan.surface_indices[rescan.next_surface_pos]
+  rescan.next_surface_pos = rescan.next_surface_pos + 1
+  return idx
+end
+
+-- Slow true-up: walk a name-filtered snapshot per surface, registering any
+-- consumer the event handlers missed. The count fast-path skips surfaces
+-- whose registered count already matches the surface's actual count.
+local function run_rescan(budget)
+  if budget <= 0 then return end
+  if not next(storage.known_consumer_names) then return end
+
+  local rescan = storage.rescan
+  local skipped_surfaces = 0
+
+  while budget > 0 do
+    if not rescan.entities or rescan.cursor > #rescan.entities then
+      local si = pick_next_surface(rescan)
+      if not si then return end
+      -- Don't fast-path-skip more surfaces in a single tick than exist; otherwise
+      -- a tick where every surface is up-to-date would loop forever.
+      if skipped_surfaces >= #rescan.surface_indices then return end
+
+      local surface = game.get_surface(si)
+      local snapshot_taken = false
+      if surface and surface.valid then
+        local names    = get_known_names_array()
+        local count    = surface.count_entities_filtered{ name = names, force = "player" }
+        local known    = storage.consumer_count_by_surface[si] or 0
+        if count ~= known then
+          rescan.entities        = surface.find_entities_filtered{ name = names, force = "player" }
+          rescan.cursor          = 1
+          rescan.current_surface = si
+          snapshot_taken         = true
+        end
+      end
+
+      if not snapshot_taken then
+        rescan.entities        = nil
+        rescan.current_surface = nil
+        skipped_surfaces       = skipped_surfaces + 1
+        budget                 = budget - 1
+      end
+    else
+      local entity = rescan.entities[rescan.cursor]
+      rescan.cursor = rescan.cursor + 1
+      if entity and entity.valid then
+        handle_built_entity(entity)
+      end
+      budget = budget - 1
+    end
+  end
+end
+
 local function on_step()
+  local rescan_budget = math.floor(batch_size * RESCAN_BUDGET_RATIO)
+  local fill_budget   = batch_size - rescan_budget
+
   for surface_index, queue in pairs(storage.consumer_queue) do
     local surface_chests = storage.chests_by_surface[surface_index]
     if surface_chests and next(surface_chests) then
@@ -225,7 +306,7 @@ local function on_step()
         local processed = 0
         local nil_count = 0
         local consumers = storage.consumers
-        while processed < batch_size do
+        while processed < fill_budget do
           if cursor > n then
             if nil_count * 4 > n then
               local compact = {}
@@ -260,6 +341,8 @@ local function on_step()
       end
     end
   end
+
+  run_rescan(rescan_budget)
 end
 
 local function parse_overrides(s)
@@ -292,11 +375,8 @@ end
 local function scan_all_surfaces()
   for _, surface in pairs(game.surfaces) do
     init_surface(surface.index)
-    for _, entity in pairs(surface.find_entities_filtered{ type = CONSUMER_TYPES }) do
-      try_register_consumer(entity)
-    end
-    for _, entity in pairs(surface.find_entities_filtered{ name = CHEST_NAME }) do
-      register_chest(entity)
+    for _, entity in pairs(surface.find_entities()) do
+      handle_built_entity(entity)
     end
   end
 end
@@ -333,9 +413,9 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   end
 end)
 
-script.on_event(defines.events.on_built_entity,                on_built, built_filter)
-script.on_event(defines.events.on_robot_built_entity,          on_built, built_filter)
-script.on_event(defines.events.on_space_platform_built_entity, on_built, built_filter)
+script.on_event(defines.events.on_built_entity,                on_built)
+script.on_event(defines.events.on_robot_built_entity,          on_built)
+script.on_event(defines.events.on_space_platform_built_entity, on_built)
 script.on_event(defines.events.script_raised_built,            on_built)
 script.on_event(defines.events.script_raised_revive,           on_built)
 script.on_event(defines.events.on_entity_cloned,               on_cloned)
