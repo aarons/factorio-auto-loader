@@ -82,13 +82,41 @@ chest.icon = nil
 chest.icon_size = nil
 chest.icons = icons
 
+-- Legacy container prototype kept loaded so the 2.0.0 migration can find any
+-- existing instances and replace them with the linked variant. Hidden so it
+-- doesn't show up in pickers or Factoriopedia going forward.
+chest.hidden = true
+
+local linked_chest = table.deepcopy(source)
+linked_chest.type = "linked-container"
+linked_chest.name = "auto-loader-chest-linked"
+linked_chest.minable = { mining_time = 0.2, result = "auto-loader-chest" }
+linked_chest.inventory_size = 100
+linked_chest.inventory_type = "with_filters_and_bar"
+linked_chest.gui_mode = "none"
+linked_chest.localised_name = { "entity-name.auto-loader-chest" }
+linked_chest.localised_description = { "entity-description.auto-loader-chest" }
+linked_chest.placeable_by = { item = "auto-loader-chest", count = 1 }
+linked_chest.icon = nil
+linked_chest.icon_size = nil
+linked_chest.icons = table.deepcopy(icons)
+
+if linked_chest.picture then
+  apply_tint_to_sprite(linked_chest.picture)
+end
+
+linked_chest.enable_inventory_bar = nil
+linked_chest.scale_info_icons = nil
+linked_chest.circuit_wire_max_distance = nil
+linked_chest.circuit_connector = nil
+
 local item = {
   type = "item",
   name = "auto-loader-chest",
   icons = table.deepcopy(icons),
   subgroup = "logistic-network",
   order = "a[items]-b[auto-loader-chest]",
-  place_result = "auto-loader-chest",
+  place_result = "auto-loader-chest-linked",
   stack_size = 50,
 }
 
@@ -103,15 +131,7 @@ local recipe = {
   },
 }
 
-data:extend({
-  chest, item, recipe,
-  {
-    type = "custom-input",
-    name = "al-inspect",
-    key_sequence = "CONTROL + 5",
-    consuming = "none",
-  },
-})
+data:extend({ chest, linked_chest, item, recipe })
 
 local tech_name = TECH_BY_AVAILABILITY[availability]
 if tech_name then
