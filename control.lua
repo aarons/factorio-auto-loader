@@ -199,31 +199,52 @@ end
 
 local function fill_one_inventory(consumer_inv, shared_inv, consumer_count)
   if not consumer_inv or consumer_inv.is_full() then return end
-  for _, stack in ipairs(shared_inv.get_contents()) do
-    local quality = stack.quality or "normal"
-    local cap = max_insert_overrides[stack.name] or max_fill
-    if cap > 0 then
-      -- Smooth fair-share: when this item is scarce relative to the
-      -- consumer pool, shrink the per-visit cap so everyone gets a turn
-      -- before the first few hoard up to max_fill. Floor of zero is
-      -- bumped to 1 so a starving consumer still gets at least one unit
-      -- if any stock exists.
-      local share = math.floor(stack.count / consumer_count)
-      if share < 1 then share = 1 end
-      if share < cap then cap = share end
-      local current = consumer_inv.get_item_count{ name = stack.name, quality = quality }
-      local want = cap - current
-      if want > 0 then
-        local to_insert = stack.count < want and stack.count or want
-        local inserted = consumer_inv.insert{
-          name = stack.name, count = to_insert, quality = quality,
-        }
-        if inserted > 0 then
-          shared_inv.remove{ name = stack.name, count = inserted, quality = quality }
+
+  -- Per-item totals across the whole shared inventory. Fair-share divides
+  -- by the surface-wide stock so a single item split across multiple slots
+  -- (e.g. for filter pinning) is still treated as one pool for scarcity.
+  local totals = {}
+  for _, entry in ipairs(shared_inv.get_contents()) do
+    totals[entry.name .. "|" .. (entry.quality or "normal")] = entry.count
+  end
+
+  -- Slot-order iteration is the priority knob: earlier slots are pulled
+  -- first. Players use the chest's filter slots to pin specific ammo or
+  -- fuel to the front (e.g. uranium in slot 1, piercing in slot 2) and
+  -- this loop honors that order. Pulls drain the slot directly via the
+  -- LuaItemStack so we don't accidentally take from a later same-item
+  -- slot the player intended as fallback.
+  local size = #shared_inv
+  for i = 1, size do
+    local stack = shared_inv[i]
+    if stack.valid_for_read then
+      local name = stack.name
+      local quality = stack.quality and stack.quality.name or "normal"
+      local cap = max_insert_overrides[name] or max_fill
+      if cap > 0 then
+        -- Smooth fair-share: when this item is scarce relative to the
+        -- consumer pool, shrink the per-visit cap so everyone gets a turn
+        -- before the first few hoard up to max_fill. Floor of zero is
+        -- bumped to 1 so a starving consumer still gets at least one unit
+        -- if any stock exists.
+        local total = totals[name .. "|" .. quality] or stack.count
+        local share = math.floor(total / consumer_count)
+        if share < 1 then share = 1 end
+        if share < cap then cap = share end
+        local current = consumer_inv.get_item_count{ name = name, quality = quality }
+        local want = cap - current
+        if want > 0 then
+          local to_insert = stack.count < want and stack.count or want
+          local inserted = consumer_inv.insert{
+            name = name, count = to_insert, quality = quality,
+          }
+          if inserted > 0 then
+            stack.count = stack.count - inserted
+          end
         end
       end
+      if consumer_inv.is_full() then return end
     end
-    if consumer_inv.is_full() then return end
   end
 end
 
