@@ -103,7 +103,15 @@ local recipe = {
   },
 }
 
-data:extend({ chest, item, recipe })
+data:extend({
+  chest, item, recipe,
+  {
+    type = "custom-input",
+    name = "al-inspect",
+    key_sequence = "CONTROL + 5",
+    consuming = "none",
+  },
+})
 
 local tech_name = TECH_BY_AVAILABILITY[availability]
 if tech_name then
