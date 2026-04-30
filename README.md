@@ -4,20 +4,23 @@ A small Factorio Space Age (2.0) mod that adds an **Auto-Loader Chest**.
 Drop ammo or fuel into one and it tops up nearby compatible entities on the
 **same surface** — no GUI, no circuit logic, no logistic-network integration.
 
-The chest reuses the vanilla **active-provider-chest** sprite with an amber
-tint to mark it as the loader, so it should look distinct on the map without
-shipping new art.
+The chest reuses the vanilla **steel-chest** sprite with an amber tint to
+mark it as the loader, so it should look distinct on the map without shipping
+new art. Internally it's a `linked-container`, so every chest on the same
+surface shares one inventory pool.
 
 ## Install
 
 Drop the mod folder into your Factorio `mods/` directory:
 
-- macOS: `~/Library/Application Support/factorio/mods/auto-loader-chest_1.0.0/`
-- Linux: `~/.factorio/mods/auto-loader-chest_1.0.0/`
-- Windows: `%APPDATA%\Factorio\mods\auto-loader-chest_1.0.0\`
+- macOS: `~/Library/Application Support/factorio/mods/`
+- Linux: `~/.factorio/mods/`
+- Windows: `%APPDATA%\Factorio\mods\`
 
-Restart Factorio. The chest's recipe is enabled by default — craft it from
-1 iron chest + 2 electronic circuits.
+Restart Factorio. Recipe cost and unlock are configurable via startup
+settings (`auto-loader-chest-cost`, `auto-loader-chest-availability`); by
+default it costs 1 steel chest + 3 electronic circuits + 1 advanced circuit
+and unlocks with **Construction robotics**.
 
 ## Runtime settings
 

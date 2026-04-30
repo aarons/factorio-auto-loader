@@ -4,6 +4,6 @@
   "factorio_version": "2.0",
   "title": "AmmoLoader+=1",
   "author": "raley",
-  "description": "Adds an ammoloader chest that automatically refills ammo and fuel of turrets and furnaces. Works with Spacce Age and Quality",
+  "description": "Adds an ammoloader chest that automatically refills ammo and fuel of turrets and furnaces. Works with Space Age and Quality",
   "dependencies": ["base", "? space-age"]
 }
