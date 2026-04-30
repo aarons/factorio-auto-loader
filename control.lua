@@ -42,6 +42,7 @@ local RESCAN_BUDGET_RATIO = 0.3
 local function reset_storage()
   storage.chests_by_surface         = {}
   storage.consumer_queue            = {}
+  storage.consumer_queue_size       = {}
   storage.consumer_cursor           = {}
   storage.consumers                 = {}
   storage.destroy_registry          = {}
@@ -63,6 +64,9 @@ local function init_surface(surface_index)
   end
   if not storage.consumer_queue[surface_index] then
     storage.consumer_queue[surface_index] = {}
+  end
+  if not storage.consumer_queue_size[surface_index] then
+    storage.consumer_queue_size[surface_index] = 0
   end
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
@@ -102,7 +106,9 @@ local function try_register_consumer(entity)
   local surface_index = entity.surface.index
   init_surface(surface_index)
   local queue = storage.consumer_queue[surface_index]
-  queue[#queue + 1] = unit_number
+  local size  = storage.consumer_queue_size[surface_index] + 1
+  queue[size] = unit_number
+  storage.consumer_queue_size[surface_index] = size
   storage.consumers[unit_number] = entity
   storage.known_consumer_names[entity.name] = true
   storage.consumer_count_by_surface[surface_index] =
@@ -129,8 +135,9 @@ local function unregister_destroyed(reg_num)
     if count_map[entry.surface_index] then
       count_map[entry.surface_index] = count_map[entry.surface_index] - 1
     end
-    -- Queue entry is left orphaned on purpose; chunk C compacts during
-    -- the tick loop. Rewriting the array here would be O(n) per removal.
+    -- Queue slot is left orphaned on purpose; the fill loop swap-pops
+    -- it on next visit. Rewriting the array here would be O(n) per
+    -- removal.
   end
 end
 
@@ -153,15 +160,19 @@ end
 
 local function clear_surface(surface_index)
   local queue = storage.consumer_queue[surface_index]
+  local size  = storage.consumer_queue_size[surface_index] or 0
   if queue then
-    for _, unit_number in ipairs(queue) do
+    for i = 1, size do
+      local unit_number = queue[i]
       if unit_number then
         storage.consumers[unit_number] = nil
+        if storage.last_fill_tick then storage.last_fill_tick[unit_number] = nil end
       end
     end
   end
   storage.chests_by_surface[surface_index]         = nil
   storage.consumer_queue[surface_index]            = nil
+  storage.consumer_queue_size[surface_index]       = nil
   storage.consumer_cursor[surface_index]           = nil
   storage.consumer_count_by_surface[surface_index] = nil
   for reg_num, entry in pairs(storage.destroy_registry) do
@@ -302,47 +313,38 @@ local function on_step()
   for surface_index, queue in pairs(storage.consumer_queue) do
     local surface_chests = storage.chests_by_surface[surface_index]
     if surface_chests and next(surface_chests) then
-      local n = #queue
+      local n = storage.consumer_queue_size[surface_index] or 0
       if n > 0 then
         local cursor = storage.consumer_cursor[surface_index] or 1
         if cursor > n then cursor = 1 end
         local processed = 0
-        local nil_count = 0
         local consumers = storage.consumers
-        while processed < fill_budget do
-          if cursor > n then
-            if nil_count * 4 > n then
-              local compact = {}
-              for i = 1, n do
-                if queue[i] then compact[#compact + 1] = queue[i] end
-              end
-              storage.consumer_queue[surface_index] = compact
-              queue = compact
-              n = #compact
-            end
-            if n == 0 then break end
-            cursor = 1
-            nil_count = 0
-          end
+        while processed < fill_budget and n > 0 do
+          if cursor > n then cursor = 1 end
           local unit_number = queue[cursor]
-          if unit_number then
-            local entity = consumers[unit_number]
-            if entity and entity.valid then
-              local inserted = fill_consumer(entity, surface_chests)
-              if inserted > 0 then
-                storage.last_fill_tick[unit_number] = game.tick
-              end
-              processed = processed + 1
-            else
-              queue[cursor] = nil
-              consumers[unit_number] = nil
-              nil_count = nil_count + 1
+          local entity = unit_number and consumers[unit_number]
+          if entity and entity.valid then
+            local inserted = fill_consumer(entity, surface_chests)
+            if inserted > 0 then
+              storage.last_fill_tick[unit_number] = game.tick
             end
+            processed = processed + 1
+            cursor = cursor + 1
           else
-            nil_count = nil_count + 1
+            -- Orphan: swap with the last live entry and shrink. Cursor
+            -- stays put — the slot now holds a different entity that we
+            -- haven't visited this cycle. Avoids leaving nil holes that
+            -- would make `#queue` return an arbitrary border.
+            if unit_number then
+              consumers[unit_number] = nil
+              if storage.last_fill_tick then storage.last_fill_tick[unit_number] = nil end
+            end
+            queue[cursor] = queue[n]
+            queue[n] = nil
+            n = n - 1
           end
-          cursor = cursor + 1
         end
+        storage.consumer_queue_size[surface_index] = n
         storage.consumer_cursor[surface_index] = cursor
       end
     end
