@@ -34,11 +34,6 @@ local function link_id_for_surface(surface)
   return hash
 end
 
--- Fraction of the per-step batch budget reserved for the rescan true-up.
--- The fill loop gets the remainder. With batch_size=10 → 7 fills per surface
--- + 3 rescan actions per step.
-local RESCAN_BUDGET_RATIO = 0.3
-
 local function reset_storage()
   storage.chests_by_surface         = {}
   storage.consumer_queue            = {}
@@ -46,14 +41,6 @@ local function reset_storage()
   storage.consumer_cursor           = {}
   storage.consumers                 = {}
   storage.destroy_registry          = {}
-  storage.known_consumer_names      = {}
-  storage.rescan = {
-    surface_indices  = nil,
-    next_surface_pos = 1,
-    current_surface  = nil,
-    entities         = nil,
-    cursor           = 1,
-  }
 end
 
 local function init_surface(surface_index)
@@ -124,7 +111,6 @@ local function try_register_consumer(entity)
   queue[size] = unit_number
   storage.consumer_queue_size[surface_index] = size
   storage.consumers[unit_number] = entity
-  storage.known_consumer_names[entity.name] = true
   local reg_num = script.register_on_object_destroyed(entity)
   storage.destroy_registry[reg_num] = {
     unit_number   = unit_number,
@@ -185,12 +171,6 @@ local function clear_surface(surface_index)
       storage.destroy_registry[reg_num] = nil
     end
   end
-  local rescan = storage.rescan
-  if rescan and rescan.current_surface == surface_index then
-    rescan.current_surface = nil
-    rescan.entities        = nil
-    rescan.cursor          = 1
-  end
 end
 
 local function fill_one_inventory(consumer_inv, shared_inv)
@@ -224,79 +204,7 @@ local function fill_consumer(entity, shared_inv)
   if ammo_inv then fill_one_inventory(ammo_inv, shared_inv) end
 end
 
-local function get_known_names_array()
-  local arr = {}
-  for name in pairs(storage.known_consumer_names) do
-    arr[#arr + 1] = name
-  end
-  return arr
-end
-
--- Round-robin: advance to the next surface in the cached order, rebuilding
--- the order list when we've cycled through it.
-local function pick_next_surface(rescan)
-  if not rescan.surface_indices or rescan.next_surface_pos > #rescan.surface_indices then
-    rescan.surface_indices = {}
-    for _, surface in pairs(game.surfaces) do
-      rescan.surface_indices[#rescan.surface_indices + 1] = surface.index
-    end
-    rescan.next_surface_pos = 1
-  end
-  if #rescan.surface_indices == 0 then return nil end
-  local idx = rescan.surface_indices[rescan.next_surface_pos]
-  rescan.next_surface_pos = rescan.next_surface_pos + 1
-  return idx
-end
-
--- Slow true-up: walk a name-filtered snapshot per surface, registering any
--- consumer the event handlers missed.
-local function run_rescan(budget)
-  if budget <= 0 then return end
-  if not next(storage.known_consumer_names) then return end
-
-  local rescan = storage.rescan
-  local empty_surfaces = 0
-
-  while budget > 0 do
-    if not rescan.entities or rescan.cursor > #rescan.entities then
-      local si = pick_next_surface(rescan)
-      if not si then return end
-      -- Cap empty-surface walks at one full pass so we don't loop forever
-      -- when every surface has zero matching entities.
-      if empty_surfaces >= #rescan.surface_indices then return end
-
-      local surface = game.get_surface(si)
-      local entities
-      if surface and surface.valid then
-        local names = get_known_names_array()
-        entities = surface.find_entities_filtered{ name = names, force = "player" }
-      end
-
-      budget = budget - 1
-      if entities and #entities > 0 then
-        rescan.entities        = entities
-        rescan.cursor          = 1
-        rescan.current_surface = si
-      else
-        rescan.entities        = nil
-        rescan.current_surface = nil
-        empty_surfaces         = empty_surfaces + 1
-      end
-    else
-      local entity = rescan.entities[rescan.cursor]
-      rescan.cursor = rescan.cursor + 1
-      if entity and entity.valid then
-        handle_built_entity(entity)
-      end
-      budget = budget - 1
-    end
-  end
-end
-
 local function on_step()
-  local rescan_budget = math.max(math.floor(batch_size * RESCAN_BUDGET_RATIO), 1)
-  local fill_budget   = math.max(batch_size - rescan_budget, 1)
-
   for surface_index, queue in pairs(storage.consumer_queue) do
     local shared_inv = get_shared_inventory(surface_index)
     if shared_inv and not shared_inv.is_empty() then
@@ -306,7 +214,7 @@ local function on_step()
         if cursor > n then cursor = 1 end
         local processed = 0
         local consumers = storage.consumers
-        while processed < fill_budget and n > 0 do
+        while processed < batch_size and n > 0 do
           if cursor > n then cursor = 1 end
           local unit_number = queue[cursor]
           local entity = unit_number and consumers[unit_number]
@@ -332,8 +240,6 @@ local function on_step()
       end
     end
   end
-
-  run_rescan(rescan_budget)
 end
 
 local function parse_overrides(s)
