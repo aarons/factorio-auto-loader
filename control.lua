@@ -47,7 +47,6 @@ local function reset_storage()
   storage.consumers                 = {}
   storage.destroy_registry          = {}
   storage.known_consumer_names      = {}
-  storage.consumer_count_by_surface = {}
   storage.rescan = {
     surface_indices  = nil,
     next_surface_pos = 1,
@@ -69,9 +68,6 @@ local function init_surface(surface_index)
   end
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
-  end
-  if not storage.consumer_count_by_surface[surface_index] then
-    storage.consumer_count_by_surface[surface_index] = 0
   end
 end
 
@@ -129,8 +125,6 @@ local function try_register_consumer(entity)
   storage.consumer_queue_size[surface_index] = size
   storage.consumers[unit_number] = entity
   storage.known_consumer_names[entity.name] = true
-  storage.consumer_count_by_surface[surface_index] =
-    storage.consumer_count_by_surface[surface_index] + 1
   local reg_num = script.register_on_object_destroyed(entity)
   storage.destroy_registry[reg_num] = {
     unit_number   = unit_number,
@@ -148,10 +142,6 @@ local function unregister_destroyed(reg_num)
     if chests then chests[entry.unit_number] = nil end
   else
     storage.consumers[entry.unit_number] = nil
-    local count_map = storage.consumer_count_by_surface
-    if count_map[entry.surface_index] then
-      count_map[entry.surface_index] = count_map[entry.surface_index] - 1
-    end
     -- Queue slot is left orphaned on purpose; the fill loop swap-pops
     -- it on next visit. Rewriting the array here would be O(n) per
     -- removal.
@@ -190,7 +180,6 @@ local function clear_surface(surface_index)
   storage.consumer_queue[surface_index]            = nil
   storage.consumer_queue_size[surface_index]       = nil
   storage.consumer_cursor[surface_index]           = nil
-  storage.consumer_count_by_surface[surface_index] = nil
   for reg_num, entry in pairs(storage.destroy_registry) do
     if entry.surface_index == surface_index then
       storage.destroy_registry[reg_num] = nil

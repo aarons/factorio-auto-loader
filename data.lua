@@ -52,17 +52,9 @@ if not source then
   error("auto-loader-chest: vanilla steel-chest prototype not found")
 end
 
-local chest = table.deepcopy(source)
-chest.name = "auto-loader-chest"
-chest.minable = { mining_time = 0.2, result = "auto-loader-chest" }
-
-if chest.picture then
-  apply_tint_to_sprite(chest.picture)
-end
-
 local function tinted_icons()
-  if chest.icons then
-    local icons = table.deepcopy(chest.icons)
+  if source.icons then
+    local icons = table.deepcopy(source.icons)
     for _, entry in ipairs(icons) do
       entry.tint = TINT
     end
@@ -70,22 +62,14 @@ local function tinted_icons()
   end
   return {
     {
-      icon = chest.icon,
-      icon_size = chest.icon_size,
+      icon = source.icon,
+      icon_size = source.icon_size,
       tint = TINT,
     },
   }
 end
 
 local icons = tinted_icons()
-chest.icon = nil
-chest.icon_size = nil
-chest.icons = icons
-
--- Legacy container prototype kept loaded so the 2.0.0 migration can find any
--- existing instances and replace them with the linked variant. Hidden so it
--- doesn't show up in pickers or Factoriopedia going forward.
-chest.hidden = true
 
 local linked_chest = table.deepcopy(source)
 linked_chest.type = "linked-container"
@@ -131,7 +115,7 @@ local recipe = {
   },
 }
 
-data:extend({ chest, linked_chest, item, recipe })
+data:extend({ linked_chest, item, recipe })
 
 local tech_name = TECH_BY_AVAILABILITY[availability]
 if tech_name then
