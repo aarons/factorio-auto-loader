@@ -244,42 +244,38 @@ local function pick_next_surface(rescan)
 end
 
 -- Slow true-up: walk a name-filtered snapshot per surface, registering any
--- consumer the event handlers missed. The count fast-path skips surfaces
--- whose registered count already matches the surface's actual count.
+-- consumer the event handlers missed.
 local function run_rescan(budget)
   if budget <= 0 then return end
   if not next(storage.known_consumer_names) then return end
 
   local rescan = storage.rescan
-  local skipped_surfaces = 0
+  local empty_surfaces = 0
 
   while budget > 0 do
     if not rescan.entities or rescan.cursor > #rescan.entities then
       local si = pick_next_surface(rescan)
       if not si then return end
-      -- Don't fast-path-skip more surfaces in a single tick than exist; otherwise
-      -- a tick where every surface is up-to-date would loop forever.
-      if skipped_surfaces >= #rescan.surface_indices then return end
+      -- Cap empty-surface walks at one full pass so we don't loop forever
+      -- when every surface has zero matching entities.
+      if empty_surfaces >= #rescan.surface_indices then return end
 
       local surface = game.get_surface(si)
-      local snapshot_taken = false
+      local entities
       if surface and surface.valid then
-        local names    = get_known_names_array()
-        local count    = surface.count_entities_filtered{ name = names, force = "player" }
-        local known    = storage.consumer_count_by_surface[si] or 0
-        if count ~= known then
-          rescan.entities        = surface.find_entities_filtered{ name = names, force = "player" }
-          rescan.cursor          = 1
-          rescan.current_surface = si
-          snapshot_taken         = true
-        end
+        local names = get_known_names_array()
+        entities = surface.find_entities_filtered{ name = names, force = "player" }
       end
 
-      if not snapshot_taken then
+      budget = budget - 1
+      if entities and #entities > 0 then
+        rescan.entities        = entities
+        rescan.cursor          = 1
+        rescan.current_surface = si
+      else
         rescan.entities        = nil
         rescan.current_surface = nil
-        skipped_surfaces       = skipped_surfaces + 1
-        budget                 = budget - 1
+        empty_surfaces         = empty_surfaces + 1
       end
     else
       local entity = rescan.entities[rescan.cursor]
@@ -293,8 +289,8 @@ local function run_rescan(budget)
 end
 
 local function on_step()
-  local rescan_budget = math.floor(batch_size * RESCAN_BUDGET_RATIO)
-  local fill_budget   = batch_size - rescan_budget
+  local rescan_budget = math.max(math.floor(batch_size * RESCAN_BUDGET_RATIO), 1)
+  local fill_budget   = math.max(batch_size - rescan_budget, 1)
 
   for surface_index, queue in pairs(storage.consumer_queue) do
     local surface_chests = storage.chests_by_surface[surface_index]
