@@ -42,12 +42,4 @@ data:extend({
     maximum_value = 1000,
     order = "c",
   },
-  {
-    type = "string-setting",
-    name = "auto-loader-chest-insert-overrides",
-    setting_type = "runtime-global",
-    default_value = "nuclear-fuel=1,uranium-fuel-cell=1",
-    allow_blank = true,
-    order = "d",
-  },
 })

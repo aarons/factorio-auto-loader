@@ -1,12 +1,7 @@
--- Maintains a live registry of auto-loader chests and compatible consumer
--- entities per surface, then walks the consumer queue every N ticks and
--- pulls items from the surface's chest pool into each consumer.
-
 local batch_size
 local tick_interval
 local current_nth_tick
 local max_fill
-local max_insert_overrides = {}
 local fill_consumer  -- forward decl: try_register_consumer instant-fills via this
 
 local AMMO_INVENTORY = {
@@ -37,6 +32,7 @@ end
 
 local function reset_storage()
   storage.chests_by_surface         = {}
+  storage.shared_chest              = {}
   storage.consumer_queue            = {}
   storage.consumer_queue_size       = {}
   storage.consumer_cursor           = {}
@@ -75,6 +71,9 @@ local function register_chest(entity)
   local chests = storage.chests_by_surface[surface_index]
   if chests[unit_number] then return end
   chests[unit_number] = entity
+  if not storage.shared_chest[surface_index] then
+    storage.shared_chest[surface_index] = entity
+  end
   local reg_num = script.register_on_object_destroyed(entity)
   storage.destroy_registry[reg_num] = {
     unit_number   = unit_number,
@@ -83,18 +82,25 @@ local function register_chest(entity)
   }
 end
 
--- Any registered chest on the surface can hand back the shared inventory —
--- they're all linked. Sweep dead unit_numbers we encounter along the way.
+-- All chests on a surface share one linked-container inventory, so any valid
+-- one will do. We cache a single entity for an O(1) hot path; if it's gone
+-- (destroy event missed, mod meddling) we rescan the map and re-cache.
 local function get_shared_inventory(surface_index)
+  local cached = storage.shared_chest[surface_index]
+  if cached and cached.valid then
+    return cached.get_inventory(defines.inventory.chest)
+  end
   local chests = storage.chests_by_surface[surface_index]
   if not chests then return nil end
   for un, entity in pairs(chests) do
     if entity.valid then
+      storage.shared_chest[surface_index] = entity
       return entity.get_inventory(defines.inventory.chest)
     else
       chests[un] = nil
     end
   end
+  storage.shared_chest[surface_index] = nil
   return nil
 end
 
@@ -144,6 +150,10 @@ local function unregister_destroyed(reg_num)
   if entry.kind == "chest" then
     local chests = storage.chests_by_surface[entry.surface_index]
     if chests then chests[entry.unit_number] = nil end
+    local cached = storage.shared_chest[entry.surface_index]
+    if cached and (not cached.valid or cached.unit_number == entry.unit_number) then
+      storage.shared_chest[entry.surface_index] = nil
+    end
   else
     storage.consumers[entry.unit_number] = nil
     local counts = storage.consumer_counts[entry.surface_index]
@@ -186,6 +196,7 @@ local function clear_surface(surface_index)
     end
   end
   storage.chests_by_surface[surface_index]         = nil
+  storage.shared_chest[surface_index]              = nil
   storage.consumer_queue[surface_index]            = nil
   storage.consumer_queue_size[surface_index]       = nil
   storage.consumer_cursor[surface_index]           = nil
@@ -211,36 +222,32 @@ local function fill_one_inventory(consumer_inv, shared_inv, consumer_count)
   -- Slot-order iteration is the priority knob: earlier slots are pulled
   -- first. Players use the chest's filter slots to pin specific ammo or
   -- fuel to the front (e.g. uranium in slot 1, piercing in slot 2) and
-  -- this loop honors that order. Pulls drain the slot directly via the
-  -- LuaItemStack so we don't accidentally take from a later same-item
-  -- slot the player intended as fallback.
+  -- this loop honors that order.
   local size = #shared_inv
   for i = 1, size do
     local stack = shared_inv[i]
     if stack.valid_for_read then
       local name = stack.name
       local quality = stack.quality and stack.quality.name or "normal"
-      local cap = max_insert_overrides[name] or max_fill
-      if cap > 0 then
-        -- Smooth fair-share: when this item is scarce relative to the
-        -- consumer pool, shrink the per-visit cap so everyone gets a turn
-        -- before the first few hoard up to max_fill. Floor of zero is
-        -- bumped to 1 so a starving consumer still gets at least one unit
-        -- if any stock exists.
-        local total = totals[name .. "|" .. quality] or stack.count
-        local share = math.floor(total / consumer_count)
-        if share < 1 then share = 1 end
-        if share < cap then cap = share end
-        local current = consumer_inv.get_item_count{ name = name, quality = quality }
-        local want = cap - current
-        if want > 0 then
-          local to_insert = stack.count < want and stack.count or want
-          local inserted = consumer_inv.insert{
-            name = name, count = to_insert, quality = quality,
-          }
-          if inserted > 0 then
-            stack.count = stack.count - inserted
-          end
+      -- Smooth fair-share: when this item is scarce relative to the
+      -- consumer pool, shrink the per-visit cap so everyone gets a turn
+      -- before the first few hoard up to max_fill. Floor of zero is
+      -- bumped to 1 so a starving consumer still gets at least one unit
+      -- if any stock exists.
+      local cap = max_fill
+      local total = totals[name .. "|" .. quality] or stack.count
+      local share = math.floor(total / consumer_count)
+      if share < 1 then share = 1 end
+      if share < cap then cap = share end
+      local current = consumer_inv.get_item_count{ name = name, quality = quality }
+      local want = cap - current
+      if want > 0 then
+        local to_insert = stack.count < want and stack.count or want
+        local inserted = consumer_inv.insert{
+          name = name, count = to_insert, quality = quality,
+        }
+        if inserted > 0 then
+          stack.count = stack.count - inserted
         end
       end
       if consumer_inv.is_full() then return end
@@ -276,7 +283,7 @@ local function on_step()
             fill_consumer(entity, shared_inv, counts)
             processed = processed + 1
             cursor = cursor + 1
-          else
+          else -- entity is not valid or missing
             -- Orphan: swap-pop with the last live entry. Cursor stays
             -- put so the next iteration picks up the entity we just
             -- swapped in. Avoids leaving nil holes that would make
@@ -296,23 +303,10 @@ local function on_step()
   end
 end
 
-local function parse_overrides(s)
-  local result = {}
-  if not s or s == "" then return result end
-  for entry in string.gmatch(s, "[^,]+") do
-    local name, count = string.match(entry, "^%s*([%w%-_]+)%s*=%s*(%d+)%s*$")
-    if name and count then
-      result[name] = tonumber(count)
-    end
-  end
-  return result
-end
-
 local function refresh_settings()
   batch_size    = settings.global["auto-loader-chest-batch-size"].value
   tick_interval = settings.global["auto-loader-chest-tick-interval"].value
-  max_fill              = settings.global["auto-loader-chest-max-fill"].value
-  max_insert_overrides  = parse_overrides(settings.global["auto-loader-chest-insert-overrides"].value)
+  max_fill      = settings.global["auto-loader-chest-max-fill"].value
 end
 
 local function reapply_on_nth_tick()
@@ -355,8 +349,7 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   local name = event.setting
   if name == "auto-loader-chest-batch-size"
      or name == "auto-loader-chest-tick-interval"
-     or name == "auto-loader-chest-max-fill"
-     or name == "auto-loader-chest-insert-overrides" then
+     or name == "auto-loader-chest-max-fill" then
     refresh_settings()
     reapply_on_nth_tick()
   end
