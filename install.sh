@@ -27,4 +27,3 @@ cp -R control.lua data.lua settings.lua info.json locale "$STAGE/$SLUG/"
 cp "$ZIP" "$MODS_DIR/$ZIP"
 
 echo "Installed $ZIP -> $MODS_DIR"
-echo "Note: older versions of ${NAME}_*.zip in the mods dir are left in place; remove them manually if desired."

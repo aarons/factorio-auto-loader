@@ -6,7 +6,6 @@ local batch_size
 local tick_interval
 local current_nth_tick
 local max_fill
-local refill_trigger
 local max_insert_overrides = {}
 
 local AMMO_INVENTORY = {
@@ -17,20 +16,6 @@ local AMMO_INVENTORY = {
   ["artillery-wagon"]  = defines.inventory.artillery_wagon_ammo,
   ["character"]        = defines.inventory.character_ammo,
 }
-
--- Items whose stack size is 1 (e.g. nuclear fuel, uranium fuel cells) bypass
--- the refill trigger, since "refill when 4 or fewer" doesn't make sense when
--- you can only ever hold one of them per slot.
-local stack_size_cache = {}
-
-local function get_stack_size(name)
-  local cached = stack_size_cache[name]
-  if cached then return cached end
-  local proto = prototypes.item[name]
-  local size = proto and proto.stack_size or 1
-  stack_size_cache[name] = size
-  return size
-end
 
 local CHEST_NAME = "auto-loader-chest"
 
@@ -199,22 +184,16 @@ local function fill_one_inventory(consumer_inv, surface_chests)
           local quality = stack.quality or "normal"
           local cap = max_insert_overrides[stack.name] or max_fill
           if cap > 0 then
-            -- Clamp the trigger so it never matches or exceeds the cap; if
-            -- they were equal we'd refill on a full inventory and loop.
-            local trigger = refill_trigger
-            if trigger >= cap then trigger = cap - 1 end
             local current = consumer_inv.get_item_count{ name = stack.name, quality = quality }
-            if current <= trigger or get_stack_size(stack.name) == 1 then
-              local want = cap - current
-              if want > 0 then
-                local to_insert = stack.count < want and stack.count or want
-                local inserted = consumer_inv.insert{
-                  name = stack.name, count = to_insert, quality = quality,
-                }
-                if inserted > 0 then
-                  chest_inv.remove{ name = stack.name, count = inserted, quality = quality }
-                  total = total + inserted
-                end
+            local want = cap - current
+            if want > 0 then
+              local to_insert = stack.count < want and stack.count or want
+              local inserted = consumer_inv.insert{
+                name = stack.name, count = to_insert, quality = quality,
+              }
+              if inserted > 0 then
+                chest_inv.remove{ name = stack.name, count = inserted, quality = quality }
+                total = total + inserted
               end
             end
           end
@@ -369,7 +348,6 @@ local function refresh_settings()
   batch_size    = settings.global["auto-loader-chest-batch-size"].value
   tick_interval = settings.global["auto-loader-chest-tick-interval"].value
   max_fill              = settings.global["auto-loader-chest-max-fill"].value
-  refill_trigger        = settings.global["auto-loader-chest-refill-trigger"].value
   max_insert_overrides  = parse_overrides(settings.global["auto-loader-chest-insert-overrides"].value)
 end
 
@@ -409,15 +387,11 @@ local function trace_for_inventory(player, inv, chest_list)
       for _, stack in ipairs(cinv.get_contents()) do
         local q       = stack.quality or "normal"
         local cap     = max_insert_overrides[stack.name] or max_fill
-        local trigger = refill_trigger
-        if trigger >= cap then trigger = cap - 1 end
         local current = inv.get_item_count{ name = stack.name, quality = q }
         local can     = inv.can_insert{ name = stack.name, count = 1, quality = q }
         local note
         if cap == 0 then
           note = "skip (cap=0)"
-        elseif current > trigger and get_stack_size(stack.name) > 1 then
-          note = string.format("skip (current=%d > trigger=%d)", current, trigger)
         else
           local want = cap - current
           if want <= 0 then
@@ -498,8 +472,8 @@ local function inspect_status(player)
       if c.valid then chest_total = chest_total + 1 end
     end
   end
-  player.print(string.format("[auto-loader] consumers=%d, chests=%d, batch_size=%d, tick_interval=%d, max_fill=%d, refill_trigger=%d",
-    consumer_count, chest_total, batch_size or -1, tick_interval or -1, max_fill or -1, refill_trigger or -1))
+  player.print(string.format("[auto-loader] consumers=%d, chests=%d, batch_size=%d, tick_interval=%d, max_fill=%d",
+    consumer_count, chest_total, batch_size or -1, tick_interval or -1, max_fill or -1))
 end
 
 commands.add_command(
@@ -562,7 +536,6 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   if name == "auto-loader-chest-batch-size"
      or name == "auto-loader-chest-tick-interval"
      or name == "auto-loader-chest-max-fill"
-     or name == "auto-loader-chest-refill-trigger"
      or name == "auto-loader-chest-insert-overrides" then
     refresh_settings()
     reapply_on_nth_tick()

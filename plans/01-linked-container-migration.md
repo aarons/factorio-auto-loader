@@ -4,8 +4,7 @@
 
 Eliminate the per-consumer chest-iteration cost in `fill_one_inventory` (the
 real `O(N·M)` hot path) by switching the chest from `container` to
-`linked-container` with one shared inventory **per surface**. Also drop the
-refill-trigger gating entirely so users no longer have to tune it.
+`linked-container` with one shared inventory **per surface**.
 
 After this, the per-step cost drops from
 `consumers_on_surface × chests_on_surface × stacks_per_chest`
@@ -13,9 +12,6 @@ to
 `consumers_on_surface × stacks_in_one_shared_inventory`.
 
 ## Non-goals
-
-- Caching `AMMO_INVENTORY[entity.type]` lookups at registration time (deferred).
-- Smarter ammo/fuel selection algorithms (deferred — separate plan).
 - Cross-surface inventory sharing. We're explicitly choosing **per-surface
   pools**, not global.
 - User-configurable link_ids. The chest GUI will not expose link_id editing.
@@ -27,32 +23,17 @@ to
 | Decision | Choice | Rationale |
 |---|---|---|
 | Pool scope | One pool per surface | Matches existing mental model; cross-planet ammo pipes feel weird and would couple unrelated bases. |
-| Inventory size | 100 slots | User-specified. Plenty of buffer with stack sizes (e.g. uranium rounds at 200/stack = 20k rounds per slot). |
-| Inventory type | `with_filters_and_bar` | Player can pin slots to specific items (the requested feature). Mutually exclusive with `with_custom_stack_size`, so per-slot stack scaling is not available — slot count is the lever. |
+| Inventory size | 100 slots | Playtesting may inform this size change |
+| Inventory type | `with_filters_and_bar` | Player can pin slots to specific items. |
 | link_id source | `fnv1a32("raleys-ammo-loader-" .. surface.name)` | Deterministic from surface identity; collision-resistant across mods; stable across save reloads. **Using surface NAME, not index** — indices aren't stable across saves, names are. |
 | New entity name | `auto-loader-chest-linked` | Type changes (`container` → `linked-container`) under the same name are migration-hostile (forum bug 130815). New name + Lua migration is the safe pattern. |
 | Item / recipe name | unchanged (`auto-loader-chest`) | Players' inventories and existing recipes keep working seamlessly. Only `item.place_result` changes. |
 | Old prototype | Kept hidden in v2.0.0 for migration | Drop in a future version (e.g. v3.0.0) once we can assume all saves have migrated. |
 | Version | 2.0.0 | Underlying entity type change warrants major bump even with clean migration. |
 
-## Phased implementation
+## Implementation
 
-### Phase 1 — Remove gating (independent, mergeable on its own)
-
-Files: `settings.lua`, `control.lua`, `locale/en/loader.cfg`, `README.md`
-
-- Drop the `auto-loader-chest-refill-trigger` setting.
-- `control.lua:180-216` (`fill_one_inventory`): remove the `current ≤ trigger`
-  branch; `want = cap - current; if want > 0` is sufficient.
-- `control.lua:24-33` (`stack_size_cache` + `get_stack_size`): delete. It only
-  existed to bypass the trigger for stack-size-1 items.
-- `control.lua:411-418` (trace logic): drop trigger-related output.
-- `control.lua:367` and the `on_runtime_mod_setting_changed` filter list: drop
-  `refill_trigger` references.
-- Locale: drop trigger entries.
-- README: update settings list.
-
-### Phase 2 — Add linked-container prototype
+### Add linked-container prototype
 
 Files: `data.lua`, `info.json`
 
@@ -75,7 +56,7 @@ Files: `data.lua`, `info.json`
 - Recipe `auto-loader-chest`: unchanged.
 - `info.json`: bump version to `2.0.0`.
 
-### Phase 3 — Control logic refactor
+### Control logic refactor
 
 Files: `control.lua`
 
@@ -94,6 +75,9 @@ Files: `control.lua`
     return fnv1a32("raleys-ammo-loader-" .. surface.name)
   end
   ```
+  ** Note from principle engineer: is this really necessary? We should not be adding single use functions. Keep the codebase clean and lean.
+  ** Further note: why fallback to hash=1 and not something more unique? This is just asking for another collision with another mod.
+
 - Storage shape change:
   - `storage.chests_by_surface` keeps the same structure (`{[surface_index] =
     {[unit_number] = entity}}`) — semantics shift from "iterate all chests on
@@ -121,7 +105,7 @@ Files: `control.lua`
   - Otherwise pass the same `shared_inv` to every consumer fill in that
     surface's batch — avoids recomputing per consumer.
 
-### Phase 4 — Migration
+### Migration
 
 Files: `migrations/2.0.0.lua` (new)
 
@@ -148,47 +132,3 @@ Files: `migrations/2.0.0.lua` (new)
   calls `reset_storage` + `scan_all_surfaces` + `refresh_settings`, which
   picks up the new chests via the normal registration path.
 
-### Phase 5 — Locale + docs
-
-Files: `locale/en/loader.cfg`, `README.md`
-
-- Update `[entity-description]` to mention per-surface shared inventory and
-  filter slots.
-- Drop trigger-related setting docs.
-- README: add a section explaining the linked-pool model and what migration
-  does.
-
-## Risks & mitigations
-
-| Risk | Mitigation |
-|---|---|
-| Migration spills items if the 100-slot pool can't hold the merged contents from many old chests | Spill to ground via `spill_item_stack` + summary log line. Document. |
-| Surface rename mid-game would shift link_id and orphan existing chests on that surface | Acceptable risk — surface renames are rare. Could add a recovery scan in a future version if anyone hits it. |
-| `link_id` collision with another mod that picks the same uint32 and same force | Using a string-prefixed FNV-1a hash makes random collision probability ~2^-32 per surface. Unique mod prefix (`raleys-ammo-loader-`) protects against patterned-id mods. |
-| Old `auto-loader-chest` prototype lingers in data.raw forever | Plan to remove in v3.0.0 once a reasonable adoption window has passed. |
-| `gui_mode = "all"` might expose link_id editing, letting users shoot themselves in the foot | Verify in-game during Phase 2 implementation. Switch to `"none"` if so. |
-| Players relying on per-chest filters/bars from the old prototype | Migration drops them. The new chest supports filters; players reconfigure once. Document. |
-
-## Rollback
-
-Each phase is independently revertable:
-
-- Phase 1 alone is safe and useful regardless of phases 2–4. Ship it first.
-- Phases 2–4 are coupled (data + control + migration must land together).
-  Rollback would require a v2.0.1 that reverses the migration — not pleasant,
-  so verify carefully in a test save before tagging.
-
-## Validation checklist
-
-- [ ] New game: place chest, fill consumers, place second chest on same
-      surface, confirm shared inventory.
-- [ ] New game: place chests on Nauvis and Vulcanus, confirm pools are
-      independent (a Nauvis chest does NOT feed a Vulcanus turret).
-- [ ] Migration: load a save built with v1.1.3 with chests containing items;
-      verify each old chest is replaced, contents merged into the shared pool,
-      no items lost (or spilled to ground with a clear warning).
-- [ ] Filtering: set a slot filter on the linked chest, confirm inserter
-      can't fill that slot with a non-matching item.
-- [ ] UPS: profile before/after with ~500 turrets and 50 chests; expect a
-      meaningful drop in `on_nth_tick` time.
-- [ ] No link_id GUI exposed to players (verify `gui_mode` choice).
