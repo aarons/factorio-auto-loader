@@ -7,6 +7,7 @@ local tick_interval
 local current_nth_tick
 local max_fill
 local max_insert_overrides = {}
+local fill_consumer  -- forward decl: try_register_consumer instant-fills via this
 
 local AMMO_INVENTORY = {
   ["ammo-turret"]      = defines.inventory.turret_ammo,
@@ -40,6 +41,7 @@ local function reset_storage()
   storage.consumer_queue_size       = {}
   storage.consumer_cursor           = {}
   storage.consumers                 = {}
+  storage.consumer_counts           = {}
   storage.destroy_registry          = {}
 end
 
@@ -55,6 +57,9 @@ local function init_surface(surface_index)
   end
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
+  end
+  if not storage.consumer_counts[surface_index] then
+    storage.consumer_counts[surface_index] = { ammo = 0, fuel = 0 }
   end
 end
 
@@ -111,12 +116,25 @@ local function try_register_consumer(entity)
   queue[size] = unit_number
   storage.consumer_queue_size[surface_index] = size
   storage.consumers[unit_number] = entity
+  local counts = storage.consumer_counts[surface_index]
+  if has_fuel then counts.fuel = counts.fuel + 1 end
+  if has_ammo then counts.ammo = counts.ammo + 1 end
   local reg_num = script.register_on_object_destroyed(entity)
   storage.destroy_registry[reg_num] = {
     unit_number   = unit_number,
     kind          = "consumer",
     surface_index = surface_index,
+    has_fuel      = has_fuel,
+    has_ammo      = has_ammo,
   }
+
+  -- Instant-fill at placement so a freshly-built turret doesn't sit empty
+  -- while waiting for the cursor to come around. Uses the same smooth-cap
+  -- path as on_step, so under scarcity it only takes a fair share.
+  local shared_inv = get_shared_inventory(surface_index)
+  if shared_inv and not shared_inv.is_empty() then
+    fill_consumer(entity, shared_inv, counts)
+  end
 end
 
 local function unregister_destroyed(reg_num)
@@ -128,6 +146,11 @@ local function unregister_destroyed(reg_num)
     if chests then chests[entry.unit_number] = nil end
   else
     storage.consumers[entry.unit_number] = nil
+    local counts = storage.consumer_counts[entry.surface_index]
+    if counts then
+      if entry.has_fuel then counts.fuel = counts.fuel - 1 end
+      if entry.has_ammo then counts.ammo = counts.ammo - 1 end
+    end
     -- Queue slot is left orphaned on purpose; the fill loop swap-pops
     -- it on next visit. Rewriting the array here would be O(n) per
     -- removal.
@@ -166,6 +189,7 @@ local function clear_surface(surface_index)
   storage.consumer_queue[surface_index]            = nil
   storage.consumer_queue_size[surface_index]       = nil
   storage.consumer_cursor[surface_index]           = nil
+  storage.consumer_counts[surface_index]           = nil
   for reg_num, entry in pairs(storage.destroy_registry) do
     if entry.surface_index == surface_index then
       storage.destroy_registry[reg_num] = nil
@@ -173,12 +197,20 @@ local function clear_surface(surface_index)
   end
 end
 
-local function fill_one_inventory(consumer_inv, shared_inv)
+local function fill_one_inventory(consumer_inv, shared_inv, consumer_count)
   if not consumer_inv or consumer_inv.is_full() then return end
   for _, stack in ipairs(shared_inv.get_contents()) do
     local quality = stack.quality or "normal"
     local cap = max_insert_overrides[stack.name] or max_fill
     if cap > 0 then
+      -- Smooth fair-share: when this item is scarce relative to the
+      -- consumer pool, shrink the per-visit cap so everyone gets a turn
+      -- before the first few hoard up to max_fill. Floor of zero is
+      -- bumped to 1 so a starving consumer still gets at least one unit
+      -- if any stock exists.
+      local share = math.floor(stack.count / consumer_count)
+      if share < 1 then share = 1 end
+      if share < cap then cap = share end
       local current = consumer_inv.get_item_count{ name = stack.name, quality = quality }
       local want = cap - current
       if want > 0 then
@@ -195,13 +227,13 @@ local function fill_one_inventory(consumer_inv, shared_inv)
   end
 end
 
-local function fill_consumer(entity, shared_inv)
+fill_consumer = function(entity, shared_inv, counts)
   local fuel_inv = entity.get_fuel_inventory()
-  if fuel_inv then fill_one_inventory(fuel_inv, shared_inv) end
+  if fuel_inv then fill_one_inventory(fuel_inv, shared_inv, counts.fuel) end
 
   local idx = AMMO_INVENTORY[entity.type]
   local ammo_inv = idx and entity.get_inventory(idx)
-  if ammo_inv then fill_one_inventory(ammo_inv, shared_inv) end
+  if ammo_inv then fill_one_inventory(ammo_inv, shared_inv, counts.ammo) end
 end
 
 local function on_step()
@@ -214,19 +246,20 @@ local function on_step()
         if cursor > n then cursor = 1 end
         local processed = 0
         local consumers = storage.consumers
+        local counts = storage.consumer_counts[surface_index]
         while processed < batch_size and n > 0 do
           if cursor > n then cursor = 1 end
           local unit_number = queue[cursor]
           local entity = unit_number and consumers[unit_number]
           if entity and entity.valid then
-            fill_consumer(entity, shared_inv)
+            fill_consumer(entity, shared_inv, counts)
             processed = processed + 1
             cursor = cursor + 1
           else
-            -- Orphan: swap with the last live entry and shrink. Cursor
-            -- stays put — the slot now holds a different entity that we
-            -- haven't visited this cycle. Avoids leaving nil holes that
-            -- would make `#queue` return an arbitrary border.
+            -- Orphan: swap-pop with the last live entry. Cursor stays
+            -- put so the next iteration picks up the entity we just
+            -- swapped in. Avoids leaving nil holes that would make
+            -- `#queue` return an arbitrary border.
             if unit_number then
               consumers[unit_number] = nil
             end
