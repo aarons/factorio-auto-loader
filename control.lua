@@ -35,13 +35,13 @@ local function reset_storage()
   storage.shared_chest              = {}
   storage.chest_surface             = {}
   storage.consumer_queue            = {}
-  storage.consumer_queue_size       = {}
   storage.consumer_cursor           = {}
   storage.consumers                 = {}
   storage.consumer_counts           = {}
   storage.surface_list              = {}
   storage.surface_list_cursor       = 1
   storage.destroy_registry          = nil
+  storage.consumer_queue_size       = nil
 end
 
 -- surface_list is the round-robin axis for on_step: each step resumes at
@@ -77,9 +77,6 @@ local function init_surface(surface_index)
   end
   if not storage.consumer_queue[surface_index] then
     storage.consumer_queue[surface_index] = {}
-  end
-  if not storage.consumer_queue_size[surface_index] then
-    storage.consumer_queue_size[surface_index] = 0
   end
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
@@ -191,9 +188,7 @@ local function try_register_consumer(entity)
   }
 
   local queue = storage.consumer_queue[surface_index]
-  local size  = storage.consumer_queue_size[surface_index] + 1
-  queue[size] = consumer
-  storage.consumer_queue_size[surface_index] = size
+  queue[#queue + 1] = consumer
   storage.consumers[unit_number] = consumer
   local counts = storage.consumer_counts[surface_index]
   if has_fuel then counts.fuel = counts.fuel + 1 end
@@ -256,9 +251,8 @@ end
 
 local function clear_surface(surface_index)
   local queue = storage.consumer_queue[surface_index]
-  local size  = storage.consumer_queue_size[surface_index] or 0
   if queue then
-    for i = 1, size do
+    for i = 1, #queue do
       local consumer = queue[i]
       if consumer then storage.consumers[consumer.unit_number] = nil end
     end
@@ -270,7 +264,6 @@ local function clear_surface(surface_index)
   storage.chests_by_surface[surface_index]         = nil
   storage.shared_chest[surface_index]              = nil
   storage.consumer_queue[surface_index]            = nil
-  storage.consumer_queue_size[surface_index]       = nil
   storage.consumer_cursor[surface_index]           = nil
   storage.consumer_counts[surface_index]           = nil
   remove_surface_from_list(surface_index)
@@ -342,8 +335,8 @@ local function on_step()
   local n_surfaces = #surface_list
   if n_surfaces == 0 then return end
 
-  local sc = storage.surface_list_cursor
-  if sc < 1 or sc > n_surfaces then sc = 1 end
+  local surface_list_cursor = storage.surface_list_cursor
+  if surface_list_cursor < 1 or surface_list_cursor > n_surfaces then surface_list_cursor = 1 end
 
   local consumers = storage.consumers
   local processed = 0
@@ -356,14 +349,14 @@ local function on_step()
   -- surfaces_visited cap stops us looping forever if every surface is empty
   -- or has nothing to give.
   while processed < batch_size and surfaces_visited < n_surfaces do
-    local surface_index = surface_list[sc]
-    local n = storage.consumer_queue_size[surface_index] or 0
+    local surface_index = surface_list[surface_list_cursor]
+    local queue = storage.consumer_queue[surface_index]
+    local n = queue and #queue or 0
     local advance_surface = true
 
     if n > 0 then
       local shared_inv = get_shared_inventory(surface_index)
       if shared_inv and not shared_inv.is_empty() then
-        local queue = storage.consumer_queue[surface_index]
         local ctx = build_step_context(shared_inv)
         local cursor = storage.consumer_cursor[surface_index] or 1
         if cursor > n then cursor = 1 end
@@ -396,22 +389,21 @@ local function on_step()
           end
         end
 
-        storage.consumer_queue_size[surface_index] = n
         storage.consumer_cursor[surface_index] = cursor
         advance_surface = cycle_complete or n == 0
       end
     end
 
     if advance_surface then
-      sc = sc + 1
-      if sc > n_surfaces then sc = 1 end
+      surface_list_cursor = surface_list_cursor + 1
+      if surface_list_cursor > n_surfaces then surface_list_cursor = 1 end
       surfaces_visited = surfaces_visited + 1
     else
       break
     end
   end
 
-  storage.surface_list_cursor = sc
+  storage.surface_list_cursor = surface_list_cursor
 end
 
 local function refresh_settings()
