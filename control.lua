@@ -4,7 +4,9 @@ local current_nth_tick
 local max_fill
 local default_fuel_strategy
 local default_ammo_strategy
-local fill_consumer  -- forward decl: try_register_consumer instant-fills via this
+local fill_consumer              -- forward decl: try_register_consumer instant-fills via this
+local build_filters_for_surface  -- forward decl: register_chest seeds new CCs via this
+local update_combinators_for_surface -- forward decl: called from on_step / take_stack
 
 local AMMO_INVENTORY = {
   ["ammo-turret"]      = defines.inventory.turret_ammo,
@@ -16,7 +18,13 @@ local AMMO_INVENTORY = {
 }
 
 local CHEST_NAME = "auto-loader-chest-linked"
+local CC_NAME    = "auto-loader-chest-cc"
 local FRAME_NAME = "alc_priority_frame"
+
+-- Circuit-network signals are int32. Counts in virtual storage are Lua
+-- numbers and could in theory exceed that range; clamp before assigning
+-- to a logistic filter so we never overflow.
+local INT32_MAX = 2147483647
 
 -- Item-kind sets, populated from prototypes once at startup and refreshed
 -- on_configuration_changed. Mutated in place so closures over them stay valid.
@@ -100,6 +108,10 @@ local function reset_storage()
   storage.virtual                   = {}
   -- last_sweep_tick[surface_index] = game.tick of last on_step sweep; throttle key
   storage.last_sweep_tick           = {}
+  -- cc_by_chest[chest_unit_number] = paired hidden constant-combinator entity.
+  -- Keyed by chest unit_number so destroy events resolve in O(1) without a
+  -- separate cc-unit-number → chest map.
+  storage.cc_by_chest               = {}
   -- alc_open_chest[player_index] = surface_index of the chest the player has open
   storage.alc_open_chest            = {}
   -- alc_open_tab[player_index] = "fuel" | "ammo" — last-selected priority tab
@@ -173,6 +185,38 @@ local function register_chest(entity)
     storage.shared_chest[surface_index] = entity
   end
   script.register_on_object_destroyed(entity)
+
+  -- Spawn the paired hidden constant-combinator and script-wire it to the
+  -- chest's circuit ports. Player-attached red/green wires read the CC's
+  -- output as if produced by the chest itself. The connection is invisible
+  -- and not player-undoable because we mark it wire_origin.script.
+  local surface = entity.surface
+  local cc = surface.create_entity{
+    name      = CC_NAME,
+    position  = entity.position,
+    force     = entity.force,
+    create_build_effect_smoke = false,
+    raise_built = false,
+  }
+  if cc then
+    cc.destructible = false
+    cc.operable     = false
+    local chest_red    = entity.get_wire_connector(defines.wire_connector_id.circuit_red,           true)
+    local chest_green  = entity.get_wire_connector(defines.wire_connector_id.circuit_green,         true)
+    local cc_red       = cc.get_wire_connector(defines.wire_connector_id.combinator_output_red,     true)
+    local cc_green     = cc.get_wire_connector(defines.wire_connector_id.combinator_output_green,   true)
+    cc_red:connect_to(chest_red,     false, defines.wire_origin.script)
+    cc_green:connect_to(chest_green, false, defines.wire_origin.script)
+    -- One section is enough — the update path always writes to section 1.
+    cc.get_or_create_control_behavior():add_section()
+    storage.cc_by_chest[unit_number] = cc
+    -- Seed with the surface's current virtual contents: another chest on
+    -- this surface may have already accumulated stock before this one was
+    -- placed. Assign filters directly to this single section instead of
+    -- re-walking every chest on the surface.
+    local section = cc.get_or_create_control_behavior().get_section(1)
+    if section then section.filters = build_filters_for_surface(surface_index) end
+  end
 end
 
 -- All chests on a surface share one linked-container inventory, so any valid
@@ -306,6 +350,48 @@ local function commit_step(ctx, surface_index)
   end
 end
 
+-- Build a logistic-section filter list reflecting virtual storage on this
+-- surface — one filter per (item × quality) with a non-zero count. Per-surface
+-- (not per-chest) because all chests on a surface share one virtual store, so
+-- the same table can be assigned to every chest's combinator. No de-dup
+-- needed: sweep_into_virtual classifies each item name as exactly one of
+-- fuel/ammo (the if/elseif against AMMO_ITEMS / FUEL_ITEMS).
+build_filters_for_surface = function(surface_index)
+  local v = storage.virtual[surface_index]
+  if not v then return {} end
+  local out, k = {}, 0
+  for _, category in pairs({ v.fuel, v.ammo }) do
+    for name, entry in pairs(category) do
+      for quality, count in pairs(entry.totals) do
+        if count > 0 then
+          k = k + 1
+          out[k] = {
+            value = { type = "item", name = name, quality = quality, comparator = "=" },
+            min   = (count > INT32_MAX) and INT32_MAX or count,
+          }
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- Update every chest's paired combinator on this surface. Called only at
+-- mutation points for storage.virtual[surface_index]; idle surfaces incur
+-- zero work.
+update_combinators_for_surface = function(surface_index)
+  local chests = storage.chests_by_surface[surface_index]
+  if not chests then return end
+  local filters = build_filters_for_surface(surface_index)
+  for unit_number in pairs(chests) do
+    local cc = storage.cc_by_chest[unit_number]
+    if cc and cc.valid then
+      local section = cc.get_or_create_control_behavior().get_section(1)
+      if section then section.filters = filters end
+    end
+  end
+end
+
 local function try_register_consumer(entity)
   local unit_number = entity.unit_number
   if not unit_number then return end
@@ -347,6 +433,7 @@ local function try_register_consumer(entity)
   if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
     fill_consumer(consumer, ctx)
     commit_step(ctx, surface_index)
+    update_combinators_for_surface(surface_index)
   end
 end
 
@@ -370,6 +457,9 @@ local function on_object_destroyed(event)
     if cached and (not cached.valid or cached.unit_number == unit_number) then
       storage.shared_chest[surface_index] = nil
     end
+    local cc = storage.cc_by_chest[unit_number]
+    if cc and cc.valid then cc.destroy() end
+    storage.cc_by_chest[unit_number] = nil
   end
 end
 
@@ -400,7 +490,12 @@ local function clear_surface(surface_index)
   end
   local chests = storage.chests_by_surface[surface_index]
   if chests then
-    for unit_number in pairs(chests) do storage.chest_surface[unit_number] = nil end
+    for unit_number in pairs(chests) do
+      storage.chest_surface[unit_number] = nil
+      local cc = storage.cc_by_chest[unit_number]
+      if cc and cc.valid then cc.destroy() end
+      storage.cc_by_chest[unit_number] = nil
+    end
   end
   storage.chests_by_surface[surface_index]         = nil
   storage.shared_chest[surface_index]              = nil
@@ -547,6 +642,10 @@ local function on_step()
         storage.consumer_cursor[surface_index] = cursor
         advance_surface = cycle_complete or n == 0
         commit_step(ctx, surface_index)
+        -- Virtual storage just changed (sweep added items, fills decremented
+        -- totals, or both). Push the new state to circuit signals before
+        -- moving to the next surface. Idle surfaces never get here.
+        update_combinators_for_surface(surface_index)
       end
     end
 
@@ -580,6 +679,12 @@ end
 local function scan_all_surfaces()
   for _, surface in pairs(game.surfaces) do
     init_surface(surface.index)
+    -- Drop any orphan CCs from a prior version: reset_storage cleared
+    -- cc_by_chest, so the world has hidden combinators we no longer
+    -- track. Clean slate before register_chest recreates them.
+    for _, cc in pairs(surface.find_entities_filtered{ name = CC_NAME }) do
+      cc.destroy()
+    end
     for _, entity in pairs(surface.find_entities()) do
       handle_built_entity(entity)
     end
@@ -622,34 +727,8 @@ local function build_tab_bar(parent, active_tab)
   end
 end
 
-local function build_priority_section(parent, surface_index, category_key)
-  local v = storage.virtual[surface_index]
-  if not v then return end
-
+local function populate_priority_table(items_table, v, category_key)
   local order = v[category_key .. "_order"]
-
-  if #order == 0 then
-    parent.add{
-      type = "label",
-      caption = { "alc.empty-priority" },
-    }
-    return
-  end
-
-  local scroll = parent.add{
-    type = "scroll-pane",
-    name = "alc_scroll",
-    vertical_scroll_policy = "auto-and-reserve-space",
-    horizontal_scroll_policy = "never",
-  }
-  scroll.style.maximal_height = 400
-  scroll.style.minimal_width  = 280
-
-  local items_table = scroll.add{
-    type = "table",
-    column_count = 3,
-  }
-
   for idx = 1, #order do
     local name = order[idx]
     local entry = v[category_key][name]
@@ -691,16 +770,41 @@ local function build_priority_section(parent, surface_index, category_key)
   end
 end
 
+local function build_priority_section(parent, surface_index, category_key)
+  local v = storage.virtual[surface_index]
+  if not v then return end
+
+  local order = v[category_key .. "_order"]
+
+  if #order == 0 then
+    parent.add{
+      type = "label",
+      caption = { "alc.empty-priority" },
+    }
+    return
+  end
+
+  local scroll = parent.add{
+    type = "scroll-pane",
+    name = "alc_scroll",
+    vertical_scroll_policy = "auto-and-reserve-space",
+    horizontal_scroll_policy = "never",
+  }
+  scroll.style.maximal_height = 400
+  scroll.style.minimal_width  = 280
+
+  local items_table = scroll.add{
+    type = "table",
+    name = "alc_items",
+    column_count = 3,
+  }
+
+  populate_priority_table(items_table, v, category_key)
+end
+
 local function build_gui_for_player(player, surface_index)
   local relative = player.gui.relative
-  local saved_scroll
-  local existing = relative[FRAME_NAME]
-  if existing then
-    local old_content = existing.children[2]
-    local old_scroll = old_content and old_content.alc_scroll
-    if old_scroll then saved_scroll = old_scroll.scroll_position end
-    existing.destroy()
-  end
+  if relative[FRAME_NAME] then relative[FRAME_NAME].destroy() end
   local frame = relative.add{
     type = "frame",
     name = FRAME_NAME,
@@ -720,10 +824,28 @@ local function build_gui_for_player(player, surface_index)
     style = "inside_shallow_frame_with_padding",
   }
   build_priority_section(content, surface_index, active_tab)
-  if saved_scroll then
-    local new_scroll = content.alc_scroll
-    if new_scroll then new_scroll.scroll_position = saved_scroll end
+end
+
+-- Refresh the priority list rows in place, preserving the scroll-pane (and
+-- thus the user's scroll position). Falls back to a full rebuild if the
+-- shape needs to change (empty-state label vs. populated table).
+local function refresh_priority_items_for_player(player, surface_index)
+  local relative = player.gui.relative
+  local frame = relative[FRAME_NAME]
+  if not frame then return end
+  local active_tab = storage.alc_open_tab[player.index] or "ammo"
+  local v = storage.virtual[surface_index]
+  if not v then return end
+  local order = v[active_tab .. "_order"]
+  local content = frame.children[2]
+  local scroll = content and content.alc_scroll
+  local items_table = scroll and scroll.alc_items
+  if (not items_table) or (not order) or #order == 0 then
+    build_gui_for_player(player, surface_index)
+    return
   end
+  items_table.clear()
+  populate_priority_table(items_table, v, active_tab)
 end
 
 local function destroy_gui_for_player(player)
@@ -793,7 +915,7 @@ local function on_gui_click(event)
         order[idx + 1], order[idx] = order[idx], order[idx + 1]
       end
     end
-    if player then build_gui_for_player(player, surface_index) end
+    if player then refresh_priority_items_for_player(player, surface_index) end
     return
   end
 
@@ -817,7 +939,7 @@ local function on_gui_click(event)
       end
     end
     if not quality then
-      if player then build_gui_for_player(player, surface_index) end
+      if player then refresh_priority_items_for_player(player, surface_index) end
       return
     end
 
@@ -843,7 +965,10 @@ local function on_gui_click(event)
       entry.totals[quality] = available - to_take
     end
 
-    build_gui_for_player(player, surface_index)
+    -- Player just pulled stock out of virtual storage; refresh circuit
+    -- signals before the GUI rebuild reads from the same data.
+    update_combinators_for_surface(surface_index)
+    refresh_priority_items_for_player(player, surface_index)
     return
   end
 
@@ -858,7 +983,7 @@ local function on_gui_click(event)
     local dir = (event.button == defines.mouse_button_type.right) and -1 or 1
     local next_idx = ((cur - 1 + dir) % n) + 1
     entry.strategy = STRATEGY_NAMES[next_idx]
-    if player then build_gui_for_player(player, surface_index) end
+    if player then refresh_priority_items_for_player(player, surface_index) end
     return
   end
 end

@@ -91,8 +91,8 @@ end
 
 linked_chest.enable_inventory_bar = nil
 linked_chest.scale_info_icons = nil
-linked_chest.circuit_wire_max_distance = nil
-linked_chest.circuit_connector = nil
+linked_chest.circuit_wire_max_distance = source.circuit_wire_max_distance
+linked_chest.circuit_connector       = source.circuit_connector
 
 local item = {
   type = "item",
@@ -115,7 +115,59 @@ local recipe = {
   },
 }
 
-data:extend({ linked_chest, item, recipe })
+local empty_sprite = {
+  filename = "__core__/graphics/empty.png",
+  width = 1,
+  height = 1,
+  priority = "extra-high",
+}
+
+local empty_sprite_4way = {
+  north = empty_sprite,
+  east  = empty_sprite,
+  south = empty_sprite,
+  west  = empty_sprite,
+}
+
+local zero_wire_point = {
+  shadow = { red = { 0, 0 }, green = { 0, 0 } },
+  wire   = { red = { 0, 0 }, green = { 0, 0 } },
+}
+
+-- Hidden constant-combinator paired with each chest at runtime. Its output
+-- connectors are script-wired to the chest's circuit ports so player wires
+-- plugged into the chest read these signals as if the chest produced them.
+local cc_prototype = {
+  type = "constant-combinator",
+  name = "auto-loader-chest-cc",
+  hidden = true,
+  flags = {
+    "placeable-off-grid",
+    "not-on-map",
+    "not-deconstructable",
+    "not-blueprintable",
+    "not-selectable-in-game",
+    "hide-alt-info",
+    "no-automated-item-removal",
+    "no-automated-item-insertion",
+  },
+  selectable_in_game = false,
+  allow_copy_paste = false,
+  collision_mask = { layers = {} },
+  collision_box = { { 0, 0 }, { 0, 0 } },
+  selection_box = { { 0, 0 }, { 0, 0 } },
+  sprites = empty_sprite_4way,
+  activity_led_sprites = empty_sprite_4way,
+  activity_led_light = { intensity = 0, size = 0, color = { r = 0, g = 0, b = 0 } },
+  activity_led_light_offsets = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } },
+  circuit_wire_connection_points = {
+    zero_wire_point, zero_wire_point, zero_wire_point, zero_wire_point,
+  },
+  draw_circuit_wires = false,
+  draw_copper_wires = false,
+}
+
+data:extend({ linked_chest, item, recipe, cc_prototype })
 
 local tech_name = TECH_BY_AVAILABILITY[availability]
 if tech_name then
