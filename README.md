@@ -67,7 +67,3 @@ Examples:
 - Slot 1 filter `nuclear-fuel`, slot 2 filter `solid-fuel`, slot 3 filter
   `coal` → locomotives and burner drills burn the higher-value fuel first
   and let coal sit as a backup.
-
-Fair-share still applies: when stock is low relative to the number of
-consumers, each visit takes a smaller slice so everyone gets a turn
-before the first few top up to `max-fill`.

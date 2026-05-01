@@ -37,7 +37,6 @@ local function reset_storage()
   storage.consumer_queue            = {}
   storage.consumer_cursor           = {}
   storage.consumers                 = {}
-  storage.consumer_counts           = {}
   storage.surface_list              = {}
   storage.surface_list_cursor       = 1
 end
@@ -78,9 +77,6 @@ local function init_surface(surface_index)
   end
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
-  end
-  if not storage.consumer_counts[surface_index] then
-    storage.consumer_counts[surface_index] = { ammo = 0, fuel = 0 }
   end
   add_surface_to_list(surface_index)
 end
@@ -151,18 +147,17 @@ end
 
 -- Per-step plan for one surface. Walks shared_inv once, partitions occupied
 -- slots into fuel_slots / ammo_slots in chest-slot order (filter slot 1
--- first → priority pull), records the original total per item, and
--- precomputes a per-item cap.
+-- first → priority pull) and records the original total per item.
 --
 -- During fill: consumers don't mutate slot state; they just bump
 -- ctx.taken[key]. ctx.totals[key] - ctx.taken[key] tells us when an item
--- runs out so we don't over-insert (cap can over-promise when items < consumers).
+-- runs out so we don't over-insert.
 --
 -- At commit: drain slots in slot order, applying ctx.taken[key] to slot 0
 -- of that key first, overflowing into later slots — matches Factorio's
 -- usual slot-0-first drain. One boundary crossing per slot actually
 -- drained, regardless of how many consumers pulled the same item.
-local function build_step_context(shared_inv, fuel_consumer_count, ammo_consumer_count)
+local function build_step_context(shared_inv)
   local fuel_slots, ammo_slots = {}, {}
   local fuel_n, ammo_n = 0, 0
   local totals = {}
@@ -172,8 +167,7 @@ local function build_step_context(shared_inv, fuel_consumer_count, ammo_consumer
     local stack = shared_inv[i]
     if stack.valid_for_read then
       local kind = classify_item(stack.name)
-      if (kind == "ammo" and ammo_consumer_count > 0)
-         or (kind == "fuel" and fuel_consumer_count > 0) then
+      if kind then
         local name = stack.name
         local quality = stack.quality and stack.quality.name or "normal"
         local key = name .. "|" .. quality
@@ -193,33 +187,10 @@ local function build_step_context(shared_inv, fuel_consumer_count, ammo_consumer
     end
   end
 
-  -- Smooth fair-share: when an item is scarce relative to the consumer
-  -- pool, shrink the per-visit cap so everyone gets a turn before the
-  -- first few hoard up to max_fill. Floor of zero is bumped to 1 so a
-  -- starving consumer still gets at least one unit if any stock exists.
-  -- Fuel and ammo keys are disjoint, so a single shared cap table works.
-  local cap = {}
-  for i = 1, fuel_n do
-    local key = fuel_slots[i].key
-    if not cap[key] then
-      local share = math.floor(totals[key] / fuel_consumer_count)
-      if share < 1 then share = 1 end
-      cap[key] = max_fill < share and max_fill or share
-    end
-  end
-  for i = 1, ammo_n do
-    local key = ammo_slots[i].key
-    if not cap[key] then
-      local share = math.floor(totals[key] / ammo_consumer_count)
-      if share < 1 then share = 1 end
-      cap[key] = max_fill < share and max_fill or share
-    end
-  end
-
   return {
     fuel_slots = fuel_slots, fuel_slot_count = fuel_n,
     ammo_slots = ammo_slots, ammo_slot_count = ammo_n,
-    cap = cap, totals = totals, taken = {},
+    totals = totals, taken = {},
   }
 end
 
@@ -282,17 +253,13 @@ local function try_register_consumer(entity)
   local queue = storage.consumer_queue[surface_index]
   queue[#queue + 1] = consumer
   storage.consumers[unit_number] = consumer
-  local counts = storage.consumer_counts[surface_index]
-  if has_fuel then counts.fuel = counts.fuel + 1 end
-  if ammo_idx then counts.ammo = counts.ammo + 1 end
   script.register_on_object_destroyed(entity)
 
   -- Instant-fill at placement so a freshly-built turret doesn't sit empty
-  -- while waiting for the cursor to come around. Uses the same smooth-cap
-  -- path as on_step, so under scarcity it only takes a fair share.
+  -- while waiting for the cursor to come around.
   local shared_inv = get_shared_inventory(surface_index)
   if shared_inv and not shared_inv.is_empty() then
-    local ctx = build_step_context(shared_inv, counts.fuel, counts.ammo)
+    local ctx = build_step_context(shared_inv)
     fill_consumer(consumer, ctx)
     commit_step(ctx)
   end
@@ -306,11 +273,6 @@ local function on_object_destroyed(event)
   local consumer = storage.consumers[unit_number]
   if consumer then
     storage.consumers[unit_number] = nil
-    local counts = storage.consumer_counts[consumer.surface_index]
-    if counts then
-      if consumer.has_fuel then counts.fuel = counts.fuel - 1 end
-      if consumer.ammo_idx then counts.ammo = counts.ammo - 1 end
-    end
     return
   end
 
@@ -359,11 +321,10 @@ local function clear_surface(surface_index)
   storage.shared_chest[surface_index]              = nil
   storage.consumer_queue[surface_index]            = nil
   storage.consumer_cursor[surface_index]           = nil
-  storage.consumer_counts[surface_index]           = nil
   remove_surface_from_list(surface_index)
 end
 
-local function fill_one_inventory(consumer_inv, slots, slot_count, cap, totals, taken)
+local function fill_one_inventory(consumer_inv, slots, slot_count, totals, taken)
   if consumer_inv.is_full() then return end
 
   -- Aggregate the consumer's current contents in one boundary crossing
@@ -384,7 +345,7 @@ local function fill_one_inventory(consumer_inv, slots, slot_count, cap, totals, 
     local available = totals[key] - already_taken
     if available > 0 then
       local have = current[key] or 0
-      local want = cap[key] - have
+      local want = max_fill - have
       if want > 0 then
         local to_insert = available < want and available or want
         local inserted = consumer_inv.insert{
@@ -405,13 +366,13 @@ fill_consumer = function(consumer, ctx)
   if consumer.has_fuel and ctx.fuel_slot_count > 0 then
     local fuel_inv = entity.get_fuel_inventory()
     if fuel_inv then
-      fill_one_inventory(fuel_inv, ctx.fuel_slots, ctx.fuel_slot_count, ctx.cap, ctx.totals, ctx.taken)
+      fill_one_inventory(fuel_inv, ctx.fuel_slots, ctx.fuel_slot_count, ctx.totals, ctx.taken)
     end
   end
   if consumer.ammo_idx and ctx.ammo_slot_count > 0 then
     local ammo_inv = entity.get_inventory(consumer.ammo_idx)
     if ammo_inv then
-      fill_one_inventory(ammo_inv, ctx.ammo_slots, ctx.ammo_slot_count, ctx.cap, ctx.totals, ctx.taken)
+      fill_one_inventory(ammo_inv, ctx.ammo_slots, ctx.ammo_slot_count, ctx.totals, ctx.taken)
     end
   end
 end
@@ -443,8 +404,7 @@ local function on_step()
     if n > 0 then
       local shared_inv = get_shared_inventory(surface_index)
       if shared_inv and not shared_inv.is_empty() then
-        local counts = storage.consumer_counts[surface_index]
-        local ctx = build_step_context(shared_inv, counts.fuel, counts.ammo)
+        local ctx = build_step_context(shared_inv)
         local cursor = storage.consumer_cursor[surface_index] or 1
         if cursor > n then cursor = 1 end
         local cycle_complete = false
