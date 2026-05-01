@@ -191,15 +191,21 @@ local function register_chest(entity)
     cc.operable     = false
     -- Constant-combinator only exposes circuit_red / circuit_green (no
     -- input/output split — that's only on decider/arithmetic/selector).
-    -- connect_to takes (target, reach_check?); the optional `origin` arg
-    -- isn't available on every 2.0 build. The CC prototype sets
-    -- draw_circuit_wires = false, so the link is invisible regardless.
+    -- get_wire_connector(id, true) is nil-able: `create_if_missing` only
+    -- allocates when the prototype defines that connector, so nil-check
+    -- before connect_to (Lua's nil-shift surfaces as the misleading
+    -- "bool expected, got userdata"). wire_origin.script makes the link
+    -- invisible and not player-undoable.
     local chest_red   = entity.get_wire_connector(defines.wire_connector_id.circuit_red,   true)
     local chest_green = entity.get_wire_connector(defines.wire_connector_id.circuit_green, true)
     local cc_red      = cc.get_wire_connector(defines.wire_connector_id.circuit_red,       true)
     local cc_green    = cc.get_wire_connector(defines.wire_connector_id.circuit_green,     true)
-    cc_red:connect_to(chest_red,     false)
-    cc_green:connect_to(chest_green, false)
+    if chest_red and cc_red then
+      cc_red:connect_to(chest_red, true, defines.wire_origin.script)
+    end
+    if chest_green and cc_green then
+      cc_green:connect_to(chest_green, true, defines.wire_origin.script)
+    end
     -- One section is enough — the update path always writes to section 1.
     -- Seed with the surface's current virtual contents: another chest on
     -- this surface may have already accumulated stock before this one was
