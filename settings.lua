@@ -42,4 +42,20 @@ data:extend({
     maximum_value = 1000,
     order = "c",
   },
+  {
+    type = "string-setting",
+    name = "auto-loader-chest-default-fuel-strategy",
+    setting_type = "runtime-global",
+    default_value = "lowest_quality_first",
+    allowed_values = { "highest_quality_first", "lowest_quality_first", "highest_count_first", "lowest_count_first" },
+    order = "d",
+  },
+  {
+    type = "string-setting",
+    name = "auto-loader-chest-default-ammo-strategy",
+    setting_type = "runtime-global",
+    default_value = "highest_quality_first",
+    allowed_values = { "highest_quality_first", "lowest_quality_first", "highest_count_first", "lowest_count_first" },
+    order = "e",
+  },
 })

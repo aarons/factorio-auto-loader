@@ -76,7 +76,7 @@ linked_chest.type = "linked-container"
 linked_chest.name = "auto-loader-chest-linked"
 linked_chest.minable = { mining_time = 0.2, result = "auto-loader-chest" }
 linked_chest.inventory_size = 100
-linked_chest.inventory_type = "with_filters_and_bar"
+linked_chest.inventory_type = "with_bar"
 linked_chest.gui_mode = "none"
 linked_chest.localised_name = { "entity-name.auto-loader-chest" }
 linked_chest.localised_description = { "entity-description.auto-loader-chest" }

@@ -2,6 +2,8 @@ local batch_size
 local tick_interval
 local current_nth_tick
 local max_fill
+local default_fuel_strategy
+local default_ammo_strategy
 local fill_consumer  -- forward decl: try_register_consumer instant-fills via this
 
 local AMMO_INVENTORY = {
@@ -14,11 +16,29 @@ local AMMO_INVENTORY = {
 }
 
 local CHEST_NAME = "auto-loader-chest-linked"
+local FRAME_NAME = "alc_priority_frame"
 
 -- Item-kind sets, populated from prototypes once at startup and refreshed
 -- on_configuration_changed. Mutated in place so closures over them stay valid.
 local FUEL_ITEMS = {}
 local AMMO_ITEMS = {}
+
+-- Quality orderings — module-level, mutated in place. ASC: normal → legendary,
+-- DESC: legendary → normal. Used by the highest/lowest-quality-first strategies
+-- without per-fill allocation.
+local QUALITY_ASC = {}
+local QUALITY_DESC = {}
+
+local STRATEGY_NAMES = {
+  "highest_quality_first",
+  "lowest_quality_first",
+  "highest_count_first",
+  "lowest_count_first",
+}
+local STRATEGY_NAME_TO_INDEX = {}
+for i, name in ipairs(STRATEGY_NAMES) do
+  STRATEGY_NAME_TO_INDEX[name] = i
+end
 
 local function rebuild_item_kind_sets()
   for k in pairs(FUEL_ITEMS) do FUEL_ITEMS[k] = nil end
@@ -29,6 +49,21 @@ local function rebuild_item_kind_sets()
     elseif proto.fuel_category then
       FUEL_ITEMS[name] = true
     end
+  end
+end
+
+local function rebuild_quality_orders()
+  for k in pairs(QUALITY_ASC)  do QUALITY_ASC[k]  = nil end
+  for k in pairs(QUALITY_DESC) do QUALITY_DESC[k] = nil end
+  local list = {}
+  for name, proto in pairs(prototypes.quality) do
+    list[#list + 1] = { name = name, level = proto.level }
+  end
+  table.sort(list, function(a, b) return a.level < b.level end)
+  local n = #list
+  for i = 1, n do
+    QUALITY_ASC[i] = list[i].name
+    QUALITY_DESC[i] = list[n - i + 1].name
   end
 end
 
@@ -56,6 +91,24 @@ local function reset_storage()
   storage.consumers                 = {}
   storage.surface_list              = {}
   storage.surface_list_cursor       = 1
+  -- virtual[surface_index] = {
+  --   fuel = { [item_name] = { strategy, totals = {[quality] = count} } },
+  --   ammo = { same shape },
+  --   fuel_order = { item_name, ... },  -- priority order, position 1 = highest
+  --   ammo_order = { item_name, ... },
+  -- }
+  storage.virtual                   = {}
+  -- alc_open_chest[player_index] = surface_index of the chest the player has open
+  storage.alc_open_chest            = {}
+end
+
+local function init_surface_virtual(surface_index)
+  local v = storage.virtual[surface_index]
+  if not v then
+    v = { fuel = {}, ammo = {}, fuel_order = {}, ammo_order = {} }
+    storage.virtual[surface_index] = v
+  end
+  return v
 end
 
 -- surface_list is the round-robin axis for on_step: each step resumes at
@@ -95,6 +148,7 @@ local function init_surface(surface_index)
   if not storage.consumer_cursor[surface_index] then
     storage.consumer_cursor[surface_index] = 1
   end
+  init_surface_virtual(surface_index)
   add_surface_to_list(surface_index)
 end
 
@@ -139,80 +193,113 @@ local function get_shared_inventory(surface_index)
   return nil
 end
 
--- Per-step plan for one surface. Walks shared_inv once, partitions occupied
--- slots into fuel_slots / ammo_slots in chest-slot order (filter slot 1
--- first → priority pull) and records the original total per item.
---
--- During fill: consumers don't mutate slot state; they just bump
--- ctx.taken[key]. ctx.totals[key] - ctx.taken[key] tells us when an item
--- runs out so we don't over-insert.
---
--- At commit: drain slots in slot order, applying ctx.taken[key] to slot 0
--- of that key first, overflowing into later slots — matches Factorio's
--- usual slot-0-first drain. One boundary crossing per slot actually
--- drained, regardless of how many consumers pulled the same item.
-local function build_step_context(shared_inv)
-  local fuel_slots, ammo_slots = {}, {}
-  local fuel_n, ammo_n = 0, 0
-  local totals = {}
-
+-- Drain occupied slots into virtual storage. The chest is the inserter target
+-- and visible briefly to players, but items live as pure counts in virtual
+-- storage once swept. Slot iteration preserves the order in which items first
+-- arrive — that order seeds the priority list for newly-encountered items
+-- (and also seeds priority on first sweep after upgrade from the old
+-- slot-based model, where the player's slot 1 was already their priority 1).
+local function sweep_into_virtual(shared_inv, surface_index)
+  if shared_inv.is_empty() then return end
+  local v = init_surface_virtual(surface_index)
   local size = #shared_inv
   for i = 1, size do
     local stack = shared_inv[i]
     if stack.valid_for_read then
       local name = stack.name
-      local bucket, n
+      local category, order, default_strat
       if AMMO_ITEMS[name] then
-        ammo_n = ammo_n + 1
-        bucket, n = ammo_slots, ammo_n
+        category = v.ammo
+        order = v.ammo_order
+        default_strat = default_ammo_strategy
       elseif FUEL_ITEMS[name] then
-        fuel_n = fuel_n + 1
-        bucket, n = fuel_slots, fuel_n
+        category = v.fuel
+        order = v.fuel_order
+        default_strat = default_fuel_strategy
       end
-      if bucket then
+      if category then
+        local entry = category[name]
+        if not entry then
+          entry = { strategy = default_strat, totals = {} }
+          category[name] = entry
+          order[#order + 1] = name
+        end
         local quality = stack.quality.name
-        local key = name .. "|" .. quality
-        local count = stack.count
-        bucket[n] = {
-          stack = stack, name = name, quality = quality, key = key, count = count,
-        }
-        totals[key] = (totals[key] or 0) + count
+        entry.totals[quality] = (entry.totals[quality] or 0) + stack.count
+        stack.count = 0
       end
     end
   end
+end
 
+-- Build a quality iteration order for one priority entry, given its strategy.
+-- For quality-level strategies the cached module list is reused. For
+-- count-based strategies we sort the entry's non-zero qualities by snapshot
+-- count; the snapshot is stable for the duration of the step so all consumers
+-- see the same order (deferred-commit invariant).
+local function quality_order_for(entry)
+  local strategy = entry.strategy
+  if strategy == "highest_quality_first" then return QUALITY_DESC end
+  if strategy == "lowest_quality_first"  then return QUALITY_ASC  end
+  local totals = entry.totals
+  local list = {}
+  for q, c in pairs(totals) do
+    if c > 0 then list[#list + 1] = q end
+  end
+  if strategy == "lowest_count_first" then
+    table.sort(list, function(a, b) return totals[a] < totals[b] end)
+  else
+    table.sort(list, function(a, b) return totals[a] > totals[b] end)
+  end
+  return list
+end
+
+local function build_entries_for(category, order)
+  local out, n = {}, 0
+  for i = 1, #order do
+    local name = order[i]
+    local entry = category[name]
+    if entry then
+      n = n + 1
+      out[n] = { name = name, totals = entry.totals, q_order = quality_order_for(entry) }
+    end
+  end
+  return out, n
+end
+
+-- Per-step plan for one surface. Iterates the priority list (not slots) and
+-- precomputes a quality-iteration order per entry. Consumers pull via
+-- ctx.taken[name][quality]; ctx.totals[name][quality] is the live virtual
+-- count at step start. commit_step decrements virtual totals once at the end.
+local function build_step_context(surface_index)
+  local v = storage.virtual[surface_index]
+  if not v then return nil end
+  local fuel_entries, fuel_count = build_entries_for(v.fuel, v.fuel_order)
+  local ammo_entries, ammo_count = build_entries_for(v.ammo, v.ammo_order)
   return {
-    fuel_slots = fuel_slots, fuel_slot_count = fuel_n,
-    ammo_slots = ammo_slots, ammo_slot_count = ammo_n,
-    totals = totals, taken = {},
+    fuel_entries = fuel_entries, fuel_count = fuel_count,
+    ammo_entries = ammo_entries, ammo_count = ammo_count,
+    taken = {},
   }
 end
 
--- Drain one side's slots in slot order, applying taken[key] to each slot
--- starting from the front. A slot's contribution is min(slot.count,
--- taken[key] still owed); zero-owed slots are skipped without writing.
-local function commit_slots(slots, slot_count, taken)
-  for i = 1, slot_count do
-    local slot = slots[i]
-    local key = slot.key
-    local t = taken[key]
-    if t and t > 0 then
-      local original = slot.count
-      if t >= original then
-        slot.stack.count = 0
-        taken[key] = t - original
-      else
-        slot.stack.count = original - t
-        taken[key] = 0
+local function commit_step(ctx, surface_index)
+  local v = storage.virtual[surface_index]
+  if not v then return end
+  for name, by_q in pairs(ctx.taken) do
+    local entry = v.fuel[name] or v.ammo[name]
+    if entry then
+      local totals = entry.totals
+      for quality, t in pairs(by_q) do
+        local cur = totals[quality] or 0
+        if t >= cur then
+          totals[quality] = nil
+        else
+          totals[quality] = cur - t
+        end
       end
     end
   end
-end
-
-local function commit_step(ctx)
-  local taken = ctx.taken
-  commit_slots(ctx.fuel_slots, ctx.fuel_slot_count, taken)
-  commit_slots(ctx.ammo_slots, ctx.ammo_slot_count, taken)
 end
 
 local function try_register_consumer(entity)
@@ -250,12 +337,14 @@ local function try_register_consumer(entity)
   script.register_on_object_destroyed(entity)
 
   -- Instant-fill at placement so a freshly-built turret doesn't sit empty
-  -- while waiting for the cursor to come around.
+  -- while waiting for the cursor to come around. Sweep first in case there
+  -- are pending items to absorb.
   local shared_inv = get_shared_inventory(surface_index)
-  if shared_inv and not shared_inv.is_empty() then
-    local ctx = build_step_context(shared_inv)
+  if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
+  local ctx = build_step_context(surface_index)
+  if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
     fill_consumer(consumer, ctx)
-    commit_step(ctx)
+    commit_step(ctx, surface_index)
   end
 end
 
@@ -315,40 +404,54 @@ local function clear_surface(surface_index)
   storage.shared_chest[surface_index]              = nil
   storage.consumer_queue[surface_index]            = nil
   storage.consumer_cursor[surface_index]           = nil
+  storage.virtual[surface_index]                   = nil
   remove_surface_from_list(surface_index)
 end
 
-local function fill_one_inventory(consumer_inv, slots, slot_count, totals, taken)
+local function fill_one_inventory(consumer_inv, entries, count, taken)
   if consumer_inv.is_full() then return end
 
   -- Aggregate the consumer's current contents in one boundary crossing
   -- instead of a per-slot get_item_count{...} below.
   local current = {}
-  for _, entry in ipairs(consumer_inv.get_contents()) do
-    current[entry.name .. "|" .. (entry.quality or "normal")] = entry.count
+  for _, e in ipairs(consumer_inv.get_contents()) do
+    current[e.name .. "|" .. (e.quality or "normal")] = e.count
   end
 
-  -- Slot-order iteration is the priority knob: earlier slots are pulled
-  -- first. Players use the chest's filter slots to pin specific ammo or
-  -- fuel to the front (e.g. uranium in slot 1, piercing in slot 2) and
-  -- this loop honors that order.
-  for i = 1, slot_count do
-    local slot = slots[i]
-    local key = slot.key
-    local already_taken = taken[key] or 0
-    local available = totals[key] - already_taken
-    if available > 0 then
-      local have = current[key] or 0
-      local want = max_fill - have
-      if want > 0 then
-        local to_insert = available < want and available or want
-        local inserted = consumer_inv.insert{
-          name = slot.name, count = to_insert, quality = slot.quality,
-        }
-        if inserted > 0 then
-          taken[key] = already_taken + inserted
-          current[key] = have + inserted
-          if consumer_inv.is_full() then return end
+  -- Priority-list iteration: entries[1] is highest priority. Within an
+  -- entry, qualities are visited in q_order (per the entry's strategy).
+  for i = 1, count do
+    local entry = entries[i]
+    local name = entry.name
+    local totals = entry.totals
+    local q_order = entry.q_order
+    local taken_for_name = taken[name]
+
+    for j = 1, #q_order do
+      local quality = q_order[j]
+      local total = totals[quality] or 0
+      if total > 0 then
+        local already = (taken_for_name and taken_for_name[quality]) or 0
+        local available = total - already
+        if available > 0 then
+          local key = name .. "|" .. quality
+          local have = current[key] or 0
+          local want = max_fill - have
+          if want > 0 then
+            local to_insert = available < want and available or want
+            local inserted = consumer_inv.insert{
+              name = name, count = to_insert, quality = quality,
+            }
+            if inserted > 0 then
+              if not taken_for_name then
+                taken_for_name = {}
+                taken[name] = taken_for_name
+              end
+              taken_for_name[quality] = already + inserted
+              current[key] = have + inserted
+              if consumer_inv.is_full() then return end
+            end
+          end
         end
       end
     end
@@ -357,16 +460,16 @@ end
 
 fill_consumer = function(consumer, ctx)
   local entity = consumer.entity
-  if consumer.has_fuel and ctx.fuel_slot_count > 0 then
+  if consumer.has_fuel and ctx.fuel_count > 0 then
     local fuel_inv = entity.get_fuel_inventory()
     if fuel_inv then
-      fill_one_inventory(fuel_inv, ctx.fuel_slots, ctx.fuel_slot_count, ctx.totals, ctx.taken)
+      fill_one_inventory(fuel_inv, ctx.fuel_entries, ctx.fuel_count, ctx.taken)
     end
   end
-  if consumer.ammo_idx and ctx.ammo_slot_count > 0 then
+  if consumer.ammo_idx and ctx.ammo_count > 0 then
     local ammo_inv = entity.get_inventory(consumer.ammo_idx)
     if ammo_inv then
-      fill_one_inventory(ammo_inv, ctx.ammo_slots, ctx.ammo_slot_count, ctx.totals, ctx.taken)
+      fill_one_inventory(ammo_inv, ctx.ammo_entries, ctx.ammo_count, ctx.taken)
     end
   end
 end
@@ -396,9 +499,13 @@ local function on_step()
     local advance_surface = true
 
     if n > 0 then
+      -- Sweep first so any newly-arrived items are visible to consumers
+      -- this step. The chest stays empty in steady state.
       local shared_inv = get_shared_inventory(surface_index)
-      if shared_inv and not shared_inv.is_empty() then
-        local ctx = build_step_context(shared_inv)
+      if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
+
+      local ctx = build_step_context(surface_index)
+      if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
         local cursor = storage.consumer_cursor[surface_index] or 1
         if cursor > n then cursor = 1 end
         local cycle_complete = false
@@ -431,7 +538,7 @@ local function on_step()
 
         storage.consumer_cursor[surface_index] = cursor
         advance_surface = cycle_complete or n == 0
-        commit_step(ctx)
+        commit_step(ctx, surface_index)
       end
     end
 
@@ -448,9 +555,11 @@ local function on_step()
 end
 
 local function refresh_settings()
-  batch_size    = settings.global["auto-loader-chest-batch-size"].value
-  tick_interval = settings.global["auto-loader-chest-tick-interval"].value
-  max_fill      = settings.global["auto-loader-chest-max-fill"].value
+  batch_size              = settings.global["auto-loader-chest-batch-size"].value
+  tick_interval           = settings.global["auto-loader-chest-tick-interval"].value
+  max_fill                = settings.global["auto-loader-chest-max-fill"].value
+  default_fuel_strategy   = settings.global["auto-loader-chest-default-fuel-strategy"].value
+  default_ammo_strategy   = settings.global["auto-loader-chest-default-ammo-strategy"].value
 end
 
 local function reapply_on_nth_tick()
@@ -466,27 +575,224 @@ local function scan_all_surfaces()
     for _, entity in pairs(surface.find_entities()) do
       handle_built_entity(entity)
     end
+    -- Sweep any pre-existing chest contents into virtual storage. On first
+    -- load after upgrade from the old slot-based model this is the
+    -- migration: the player's slot order seeds priority order for free.
+    local shared_inv = get_shared_inventory(surface.index)
+    if shared_inv then sweep_into_virtual(shared_inv, surface.index) end
   end
 end
 
+-- ── GUI ──────────────────────────────────────────────────────────────────
+-- A relative-anchored frame opens beside the vanilla linked-container GUI
+-- whenever a player opens an auto-loader chest. The GUI is rebuilt fully
+-- on every interaction (priority list size N is small).
+
+local function localised_strategy(strategy)
+  return { "alc.strategy-" .. strategy:gsub("_", "-") }
+end
+
+local function localised_item_name(name)
+  local proto = prototypes.item[name]
+  if proto then return proto.localised_name end
+  return name
+end
+
+local function build_priority_section(parent, surface_index, category_key)
+  local v = storage.virtual[surface_index]
+  if not v then return end
+
+  local section = parent.add{
+    type = "frame",
+    direction = "vertical",
+    style = "inside_shallow_frame_with_padding",
+  }
+  section.add{
+    type = "label",
+    style = "caption_label",
+    caption = { "alc." .. category_key .. "-priority-heading" },
+  }
+
+  local order = v[category_key .. "_order"]
+  local items_table = section.add{
+    type = "table",
+    column_count = 5,
+  }
+
+  if #order == 0 then
+    section.add{
+      type = "label",
+      caption = { "alc.empty-priority" },
+    }
+    return
+  end
+
+  local strategy_items = {}
+  for i, sname in ipairs(STRATEGY_NAMES) do
+    strategy_items[i] = localised_strategy(sname)
+  end
+
+  for idx = 1, #order do
+    local name = order[idx]
+    local entry = v[category_key][name]
+    if entry then
+      items_table.add{
+        type = "sprite-button",
+        sprite = "item/" .. name,
+        tooltip = localised_item_name(name),
+        ignored_by_interaction = true,
+        style = "slot_button",
+      }
+      items_table.add{
+        type = "sprite-button",
+        sprite = "utility/speed_up",
+        tags = { alc_action = "up", category = category_key, idx = idx },
+        enabled = (idx > 1),
+        style = "tool_button",
+      }
+      items_table.add{
+        type = "sprite-button",
+        sprite = "utility/speed_down",
+        tags = { alc_action = "down", category = category_key, idx = idx },
+        enabled = (idx < #order),
+        style = "tool_button",
+      }
+      items_table.add{
+        type = "drop-down",
+        tags = { alc_action = "strategy", category = category_key, item = name },
+        items = strategy_items,
+        selected_index = STRATEGY_NAME_TO_INDEX[entry.strategy] or 1,
+      }
+      local total = 0
+      for _, c in pairs(entry.totals) do total = total + c end
+      items_table.add{
+        type = "label",
+        caption = tostring(total),
+      }
+    end
+  end
+end
+
+local function build_gui_for_player(player, surface_index)
+  local relative = player.gui.relative
+  if relative[FRAME_NAME] then relative[FRAME_NAME].destroy() end
+  local frame = relative.add{
+    type = "frame",
+    name = FRAME_NAME,
+    direction = "vertical",
+    caption = { "alc.priority-frame-title" },
+    anchor = {
+      gui = defines.relative_gui_type.linked_container_gui,
+      position = defines.relative_gui_position.right,
+      name = CHEST_NAME,
+    },
+  }
+  build_priority_section(frame, surface_index, "fuel")
+  build_priority_section(frame, surface_index, "ammo")
+end
+
+local function destroy_gui_for_player(player)
+  local relative = player.gui.relative
+  if relative[FRAME_NAME] then relative[FRAME_NAME].destroy() end
+end
+
+local function on_gui_opened(event)
+  if event.gui_type ~= defines.gui_type.entity then return end
+  local entity = event.entity
+  if not (entity and entity.valid) then return end
+  if entity.name ~= CHEST_NAME then return end
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  -- Sweep before showing so the GUI counts reflect anything still in transit.
+  local surface_index = entity.surface.index
+  local shared_inv = entity.get_inventory(defines.inventory.chest)
+  if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
+  storage.alc_open_chest[event.player_index] = surface_index
+  build_gui_for_player(player, surface_index)
+end
+
+local function on_gui_closed(event)
+  if event.gui_type ~= defines.gui_type.entity then return end
+  local entity = event.entity
+  if not (entity and entity.valid) then return end
+  if entity.name ~= CHEST_NAME then return end
+  local player = game.get_player(event.player_index)
+  storage.alc_open_chest[event.player_index] = nil
+  if player then destroy_gui_for_player(player) end
+end
+
+local function on_gui_click(event)
+  local element = event.element
+  if not (element and element.valid) then return end
+  local tags = element.tags
+  if not tags then return end
+  local action = tags.alc_action
+  if action ~= "up" and action ~= "down" then return end
+  local category = tags.category
+  local idx = tags.idx
+  if not (category and idx) then return end
+  local surface_index = storage.alc_open_chest[event.player_index]
+  if not surface_index then return end
+  local v = storage.virtual[surface_index]
+  if not v then return end
+  local order = v[category .. "_order"]
+  if not order then return end
+  local n = #order
+  if action == "up" then
+    if idx > 1 then
+      order[idx - 1], order[idx] = order[idx], order[idx - 1]
+    end
+  else
+    if idx < n then
+      order[idx + 1], order[idx] = order[idx], order[idx + 1]
+    end
+  end
+  local player = game.get_player(event.player_index)
+  if player then build_gui_for_player(player, surface_index) end
+end
+
+local function on_gui_selection_state_changed(event)
+  local element = event.element
+  if not (element and element.valid) then return end
+  local tags = element.tags
+  if not tags then return end
+  if tags.alc_action ~= "strategy" then return end
+  local category = tags.category
+  local item = tags.item
+  if not (category and item) then return end
+  local surface_index = storage.alc_open_chest[event.player_index]
+  if not surface_index then return end
+  local v = storage.virtual[surface_index]
+  if not v then return end
+  local entry = v[category][item]
+  if not entry then return end
+  local strategy_name = STRATEGY_NAMES[element.selected_index]
+  if strategy_name then entry.strategy = strategy_name end
+end
+
+-- ── Lifecycle ────────────────────────────────────────────────────────────
+
 script.on_init(function()
   rebuild_item_kind_sets()
+  rebuild_quality_orders()
   reset_storage()
-  scan_all_surfaces()
   refresh_settings()
+  scan_all_surfaces()
   reapply_on_nth_tick()
 end)
 
 script.on_configuration_changed(function()
   rebuild_item_kind_sets()
+  rebuild_quality_orders()
   reset_storage()
-  scan_all_surfaces()
   refresh_settings()
+  scan_all_surfaces()
   reapply_on_nth_tick()
 end)
 
 script.on_load(function()
   rebuild_item_kind_sets()
+  rebuild_quality_orders()
   refresh_settings()
   reapply_on_nth_tick()
 end)
@@ -496,7 +802,9 @@ script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   local name = event.setting
   if name == "auto-loader-chest-batch-size"
      or name == "auto-loader-chest-tick-interval"
-     or name == "auto-loader-chest-max-fill" then
+     or name == "auto-loader-chest-max-fill"
+     or name == "auto-loader-chest-default-fuel-strategy"
+     or name == "auto-loader-chest-default-ammo-strategy" then
     refresh_settings()
     reapply_on_nth_tick()
   end
@@ -530,3 +838,8 @@ script.on_event(defines.events.on_surface_cleared, function(event)
   clear_surface(event.surface_index)
   init_surface(event.surface_index)
 end)
+
+script.on_event(defines.events.on_gui_opened,                    on_gui_opened)
+script.on_event(defines.events.on_gui_closed,                    on_gui_closed)
+script.on_event(defines.events.on_gui_click,                     on_gui_click)
+script.on_event(defines.events.on_gui_selection_state_changed,   on_gui_selection_state_changed)
