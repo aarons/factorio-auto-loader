@@ -129,10 +129,8 @@ local function get_shared_inventory(surface_index)
 end
 
 -- Build a per-step shared-inventory snapshot once, then reuse it across
--- every consumer on this surface. Without this, fill_one_inventory would
--- re-call get_contents() and re-iterate every shared_inv slot per consumer
--- per inventory — O(consumers * slots) Lua<->C++ boundary crossings every
--- tick. ctx.slots holds each occupied stack with cached name/quality strings
+-- every consumer on this surface. ctx.slots holds each occupied stack with
+-- cached name/quality strings
 -- and a mutable count we decrement as we insert; ctx.totals is the
 -- cross-slot aggregate that drives fair-share. Both stay in sync with the
 -- live shared_inv as the step progresses.
