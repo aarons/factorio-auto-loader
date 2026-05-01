@@ -10,11 +10,11 @@ Scope (confirmed): only fuel + ammo (everything the mod tracks in virtual storag
 
 ## Approach
 
-Pair each chest with a **hidden constant-combinator** at the same position, script-wired to the chest's red+green circuit connectors. Each `on_nth_tick` step, build a per-surface filter list from `storage.virtual` and assign it to every chest's combinator. Player-connected wires read these signals as if the chest itself produced them.
+Pair each chest with a **hidden constant-combinator** at the same position, script-wired to the chest's red+green circuit connectors. Player-connected wires read these signals as if the chest itself produced them.
 
-Per-surface (not per-chest) signal computation is correct because all chests on a surface share one virtual store. Compute once per surface, assign to all combinators on that surface.
+Recompute the filter list **only when `storage.virtual` for that surface mutates** — never on a tick timer, never as a global sweep. The mutation points are small and known: the per-surface sweep inside `on_step`, the per-surface `commit_step` after consumer fills (both in `on_step` and instant-fill in `try_register_consumer`), and the `take_stack` GUI action. Each site already knows its `surface_index`, so updates target exactly one surface.
 
-**Note from principle engineer**: building a filter list every on_nth_tick is too aggressive. Should just update this when the chest is swept and virtual contents updated.
+Per-surface (not per-chest) computation is correct because all chests on a surface share one virtual store: build the filter list once for the surface, assign the same table to each chest's CC.
 
 ## File touch points
 
@@ -50,7 +50,7 @@ Update the doc comment block. Keying by chest unit_number means destroying a che
 ### 3. `control.lua` — lifecycle
 
 **`register_chest` (after line 173 `script.register_on_object_destroyed(entity)`):**
-Past the `if chests[unit_number] then return end` guard, this runs once per fresh registration. Spawn CC at chest position, set `destructible = false` and `operable = false`, get the chest's `circuit_red`/`circuit_green` connectors and the CC's `combinator_output_red`/`combinator_output_green` connectors, and `connect_to(other, false, defines.wire_origin.script)` for both colors. Then `cc.get_or_create_control_behavior():add_section()` once so the update path can just assign `.filters`. Store `storage.cc_by_chest[unit_number] = cc`.
+Past the `if chests[unit_number] then return end` guard, this runs once per fresh registration. Spawn CC at chest position, set `destructible = false` and `operable = false`, get the chest's `circuit_red`/`circuit_green` connectors and the CC's `combinator_output_red`/`combinator_output_green` connectors, and `connect_to(other, false, defines.wire_origin.script)` for both colors. Then `cc.get_or_create_control_behavior():add_section()` once so the update path can just assign `.filters`. Store `storage.cc_by_chest[unit_number] = cc`. Finally, seed the new CC's section with the surface's current filter list (other chests on the surface may have already accumulated virtual stock) — assign `build_filters_for_surface(surface_index)` directly to this single section rather than re-walking the whole surface.
 
 **`on_object_destroyed` (chest branch, after line 367):**
 ```lua
@@ -103,32 +103,31 @@ No de-dup needed: `sweep_into_virtual` (lines 213-221) and `rebuild_item_kind_se
 
 ### 5. `control.lua` — update path
 
-New helper:
+New helper, scoped to a single surface:
 ```lua
-local function update_all_combinators()
-  local list = storage.surface_list
-  for i = 1, #list do
-    local surface_index = list[i]
-    local filters = build_filters_for_surface(surface_index)
-    local chests = storage.chests_by_surface[surface_index]
-    if chests then
-      for unit_number in pairs(chests) do
-        local cc = storage.cc_by_chest[unit_number]
-        if cc and cc.valid then
-          local section = cc.get_or_create_control_behavior().get_section(1)
-          if section then section.filters = filters end
-        end
-      end
+local function update_combinators_for_surface(surface_index)
+  local chests = storage.chests_by_surface[surface_index]
+  if not chests then return end
+  local filters = build_filters_for_surface(surface_index)
+  for unit_number in pairs(chests) do
+    local cc = storage.cc_by_chest[unit_number]
+    if cc and cc.valid then
+      local section = cc.get_or_create_control_behavior().get_section(1)
+      if section then section.filters = filters end
     end
   end
 end
 ```
 
-Call at the **end of `on_step`** (after line 556 `storage.surface_list_cursor = surface_list_cursor`). This piggybacks on the existing `on_nth_tick(tick_interval)` handler — same UPS knob, same cadence — but walks **all surfaces**, not just those the consumer round-robin happened to visit. The consumer loop early-exits surfaces with no consumers (line 503 `if n > 0 then`), so coupling signal updates to that loop would silently break surfaces that have a wired chest but no turrets/furnaces yet.
+Call sites — exactly the points that mutate `storage.virtual`:
 
-Lag: signals are at most `tick_interval` ticks behind virtual storage state. Matches the rest of the mod's batching philosophy.
+1. **`on_step`, after `commit_step(ctx, surface_index)` (line 549).** Covers both the sweep at line 511 and the commit at 549: if sweep added items, the resulting entries flow into `ctx`, fills run, and `commit_step` runs. If sweep added nothing and there were no prior entries, `commit_step` is skipped (the `if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0)` gate at line 516) — and virtual didn't change, so no update is needed. One update per surface that did work this step.
+2. **`try_register_consumer`, after the instant-fill `commit_step` (line 349).** Same gate — only runs when there was something to take.
+3. **`on_gui_click` `take_stack` branch, after the `entry.totals[quality]` mutation (after line 844).** Player just pulled stock out of the chest; signal must reflect it before the next GUI rebuild reads from virtual.
 
-**Wire-connection optimization is intentionally skipped.** A `wire_connector.connection_count` check costs ~4 boundary calls per chest per step, close to the cost of just doing `section.filters = filters`. Add it only if profiling later shows it's needed.
+**Never walk all surfaces in one tick.** The previous design did, and that's the bug we're avoiding: it scaled with surface count regardless of activity, and did redundant work on surfaces whose virtual storage hadn't moved.
+
+Lag: zero. Signals reflect `storage.virtual` immediately after every mutation. The only inherent delay is the existing 60-tick sweep throttle (line 504-513) — items dropped into a chest by an inserter take up to ~1s to enter virtual storage, and the signal lags that by zero ticks.
 
 ### 6. `info.json` — version bump
 
@@ -148,7 +147,8 @@ Line 11: append one sentence to `auto-loader-chest=...`: *"Connect a red or gree
 4. **Multi-surface:** on Nauvis put coal in chest A; on a different surface (e.g. Vulcanus) put different items in chest B. Each chest's circuit signals should reflect only its own surface's storage.
 5. **Lifecycle:** mine the chest. Confirm the hidden CC is also gone (`/c game.print(#game.surfaces[1].find_entities_filtered{name="auto-loader-chest-cc"})`).
 6. **Reload migration:** with chests placed in a save on v2.4.0, install v2.5.0. `on_configuration_changed` runs; orphan-CC cleanup leaves zero hidden combinators before `scan_all_surfaces` re-registers chests with fresh CCs. Verify signals work post-upgrade.
-7. **No lag spike:** with ~50 chests across multiple surfaces and varied virtual storage, watch `/measured-command` against `on_nth_tick`. The added work is one `build_filters_for_surface` per surface plus one `section.filters` assignment per chest per step.
+7. **Take-stack updates signal:** with a wired chest reading (e.g.) 50 coal, click the coal slot in the priority GUI to pull a stack into the cursor. The wire reading should drop immediately to reflect the new total.
+8. **No lag spike:** with ~50 chests across multiple surfaces and varied virtual storage, watch `/measured-command` against `on_nth_tick`. The added work per step is one `build_filters_for_surface` and one `section.filters` assignment per chest, **only on surfaces whose virtual storage actually mutated this step** — idle surfaces add zero cost.
 
 ## Critical files
 
