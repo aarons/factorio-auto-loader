@@ -98,6 +98,8 @@ local function reset_storage()
   --   ammo_order = { item_name, ... },
   -- }
   storage.virtual                   = {}
+  -- last_sweep_tick[surface_index] = game.tick of last on_step sweep; throttle key
+  storage.last_sweep_tick           = {}
   -- alc_open_chest[player_index] = surface_index of the chest the player has open
   storage.alc_open_chest            = {}
   -- alc_open_tab[player_index] = "fuel" | "ammo" — last-selected priority tab
@@ -339,10 +341,8 @@ local function try_register_consumer(entity)
   script.register_on_object_destroyed(entity)
 
   -- Instant-fill at placement so a freshly-built turret doesn't sit empty
-  -- while waiting for the cursor to come around. Sweep first in case there
-  -- are pending items to absorb.
-  local shared_inv = get_shared_inventory(surface_index)
-  if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
+  -- while waiting for the cursor to come around. Operates against whatever
+  -- virtual state on_step has already accumulated.
   local ctx = build_step_context(surface_index)
   if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
     fill_consumer(consumer, ctx)
@@ -501,10 +501,16 @@ local function on_step()
     local advance_surface = true
 
     if n > 0 then
-      -- Sweep first so any newly-arrived items are visible to consumers
-      -- this step. The chest stays empty in steady state.
-      local shared_inv = get_shared_inventory(surface_index)
-      if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
+      -- Sweep at most once per 60 ticks per surface. Items dropped in by
+      -- inserters can sit in the chest for up to ~1s before redistribution;
+      -- the linked-container is shown to players directly so they see
+      -- in-flight stock there rather than only in the priority GUI.
+      local last = storage.last_sweep_tick[surface_index]
+      if not last or game.tick - last >= 60 then
+        local shared_inv = get_shared_inventory(surface_index)
+        if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
+        storage.last_sweep_tick[surface_index] = game.tick
+      end
 
       local ctx = build_step_context(surface_index)
       if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
@@ -577,11 +583,6 @@ local function scan_all_surfaces()
     for _, entity in pairs(surface.find_entities()) do
       handle_built_entity(entity)
     end
-    -- Sweep any pre-existing chest contents into virtual storage. On first
-    -- load after upgrade from the old slot-based model this is the
-    -- migration: the player's slot order seeds priority order for free.
-    local shared_inv = get_shared_inventory(surface.index)
-    if shared_inv then sweep_into_virtual(shared_inv, surface.index) end
   end
 end
 
@@ -737,10 +738,7 @@ local function on_gui_opened(event)
   if entity.name ~= CHEST_NAME then return end
   local player = game.get_player(event.player_index)
   if not player then return end
-  -- Sweep before showing so the GUI counts reflect anything still in transit.
   local surface_index = entity.surface.index
-  local shared_inv = entity.get_inventory(defines.inventory.chest)
-  if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
   storage.alc_open_chest[event.player_index] = surface_index
   build_gui_for_player(player, surface_index)
 end
