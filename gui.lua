@@ -78,8 +78,8 @@ local function populate_priority_table(items_table, v, category_key)
       local arrows = items_table.add{ type = "flow", direction = "horizontal" }
       arrows.style.horizontal_spacing = 0
       arrows.add{
-        type = "button",
-        caption = "⏫",
+        type = "sprite-button",
+        sprite = "utility/speed_up",
         tooltip = { "alc.move-to-top" },
         tags = { alc_action = "top", category = category_key, idx = idx },
         enabled = (idx > 1),
@@ -87,7 +87,7 @@ local function populate_priority_table(items_table, v, category_key)
       }
       arrows.add{
         type = "sprite-button",
-        sprite = "utility/speed_up",
+        sprite = "utility/expand",
         tooltip = { "alc.move-up" },
         tags = { alc_action = "up", category = category_key, idx = idx },
         enabled = (idx > 1),
@@ -95,15 +95,15 @@ local function populate_priority_table(items_table, v, category_key)
       }
       arrows.add{
         type = "sprite-button",
-        sprite = "utility/speed_down",
+        sprite = "utility/collapse",
         tooltip = { "alc.move-down" },
         tags = { alc_action = "down", category = category_key, idx = idx },
         enabled = (idx < #order),
         style = "tool_button",
       }
       arrows.add{
-        type = "button",
-        caption = "⏬",
+        type = "sprite-button",
+        sprite = "utility/speed_down",
         tooltip = { "alc.move-to-bottom" },
         tags = { alc_action = "bottom", category = category_key, idx = idx },
         enabled = (idx < #order),
