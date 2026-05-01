@@ -71,29 +71,3 @@ Examples:
 Fair-share still applies: when stock is low relative to the number of
 consumers, each visit takes a smaller slice so everyone gets a turn
 before the first few top up to `max-fill`.
-
-## Optimizations to Consider for UPS
-
-Cache fuel_inv and ammo_inv references on the consumer record.
-get_fuel_inventory() / get_inventory() are called every visit. LuaInventory references are stable as long as the entity is valid, so store them in
-storage.consumers[unit_number] at registration time (alongside the entity). Skip the API calls in fill_consumer entirely.
-
-Stash {has_fuel, ammo_idx} (and optionally the fuel/ammo inventory refs in a runtime-only table rebuilt in on_load from storage.consumers)
-so fill_consumer doesn't call get_fuel_inventory() + get_inventory(idx) every visit. Already tracking has_fuel/has_ammo in destroy_registry
- — promote to storage.consumers[un] = {entity=…, ammo_idx=…, has_fuel=…}.
-
-Replace get_item_count{} with a per-consumer contents snapshot.
-For each consumer inventory, one get_contents() per visit beats N get_item_count{} calls (one per slot). Build a current[name|quality] = count dict once, decrement in Lua as you insert. Eliminates ~N table allocs per consumer per inventory.
-
-Skip empty/known-full consumers cheaply.
-Currently is_full() short-circuits the outer check, but a turret with one bullet of nine ammo types is "not full" and re-scans the whole shared inventory. Track per-consumer per-item "filled to cap" state, or at least short-circuit the slot loop the moment cap - current <= 0 for everything in the snapshot. Combined with (A), the all-topped-up case becomes ~free.
-
-Avoid scanning unused slots.
-If the linked container has 48 slots but only 5 are used, the for i = 1, size loop pays 48 iterations. After (A), the snapshot can store only filled slots, so the per-consumer loop is #snapshot (=5), not #shared_inv (=48). Big multiplier on sparse chests.
-
-Quality string normalization once per snapshot.
-stack.quality and stack.quality.name or "normal" is done per-slot per-consumer today. After (A), it happens once per slot in the snapshot.
-
-Drop the totals[...] string concat key.
-Use a nested table totals[name][quality] = count instead of name .. "|" .. quality. Eliminates per-lookup string allocation. Minor but free.
-
