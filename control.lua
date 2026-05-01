@@ -100,6 +100,8 @@ local function reset_storage()
   storage.virtual                   = {}
   -- alc_open_chest[player_index] = surface_index of the chest the player has open
   storage.alc_open_chest            = {}
+  -- alc_open_tab[player_index] = "fuel" | "ammo" — last-selected priority tab
+  storage.alc_open_tab              = {}
 end
 
 local function init_surface_virtual(surface_index)
@@ -598,59 +600,77 @@ local function localised_item_name(name)
   return name
 end
 
+local STRATEGY_BUTTON_CAPTION = {
+  highest_quality_first = "Q↓",
+  lowest_quality_first  = "Q↑",
+  highest_count_first   = "N↓",
+  lowest_count_first    = "N↑",
+}
+
+local function build_tab_bar(parent, active_tab)
+  local bar = parent.add{ type = "flow", direction = "horizontal" }
+  for _, tab_key in ipairs({ "fuel", "ammo" }) do
+    local btn = bar.add{
+      type = "button",
+      caption = { "alc.tab-" .. tab_key },
+      tags = { alc_action = "tab", tab = tab_key },
+    }
+    if tab_key == active_tab then
+      btn.enabled = false
+    end
+  end
+end
+
 local function build_priority_section(parent, surface_index, category_key)
   local v = storage.virtual[surface_index]
   if not v then return end
 
-  local section = parent.add{
-    type = "frame",
-    direction = "vertical",
-    style = "inside_shallow_frame_with_padding",
-  }
-  section.add{
-    type = "label",
-    style = "caption_label",
-    caption = { "alc." .. category_key .. "-priority-heading" },
-  }
-
   local order = v[category_key .. "_order"]
-  local items_table = section.add{
-    type = "table",
-    column_count = 5,
-  }
 
   if #order == 0 then
-    section.add{
+    parent.add{
       type = "label",
       caption = { "alc.empty-priority" },
     }
     return
   end
 
-  local strategy_items = {}
-  for i, sname in ipairs(STRATEGY_NAMES) do
-    strategy_items[i] = localised_strategy(sname)
-  end
+  local scroll = parent.add{
+    type = "scroll-pane",
+    vertical_scroll_policy = "auto-and-reserve-space",
+    horizontal_scroll_policy = "never",
+  }
+  scroll.style.maximal_height = 400
+  scroll.style.minimal_width  = 280
+
+  local items_table = scroll.add{
+    type = "table",
+    column_count = 3,
+  }
 
   for idx = 1, #order do
     local name = order[idx]
     local entry = v[category_key][name]
     if entry then
+      local total = 0
+      for _, c in pairs(entry.totals) do total = total + c end
       items_table.add{
         type = "sprite-button",
         sprite = "item/" .. name,
         tooltip = localised_item_name(name),
-        ignored_by_interaction = true,
+        number = total,
         style = "slot_button",
       }
-      items_table.add{
+      local arrows = items_table.add{ type = "flow", direction = "horizontal" }
+      arrows.style.horizontal_spacing = 0
+      arrows.add{
         type = "sprite-button",
         sprite = "utility/speed_up",
         tags = { alc_action = "up", category = category_key, idx = idx },
         enabled = (idx > 1),
         style = "tool_button",
       }
-      items_table.add{
+      arrows.add{
         type = "sprite-button",
         sprite = "utility/speed_down",
         tags = { alc_action = "down", category = category_key, idx = idx },
@@ -658,16 +678,11 @@ local function build_priority_section(parent, surface_index, category_key)
         style = "tool_button",
       }
       items_table.add{
-        type = "drop-down",
-        tags = { alc_action = "strategy", category = category_key, item = name },
-        items = strategy_items,
-        selected_index = STRATEGY_NAME_TO_INDEX[entry.strategy] or 1,
-      }
-      local total = 0
-      for _, c in pairs(entry.totals) do total = total + c end
-      items_table.add{
-        type = "label",
-        caption = tostring(total),
+        type = "button",
+        caption = STRATEGY_BUTTON_CAPTION[entry.strategy] or "?",
+        tooltip = { "alc.strategy-tooltip", localised_strategy(entry.strategy) },
+        tags = { alc_action = "strategy_cycle", category = category_key, item = name },
+        style = "tool_button",
       }
     end
   end
@@ -687,8 +702,14 @@ local function build_gui_for_player(player, surface_index)
       name = CHEST_NAME,
     },
   }
-  build_priority_section(frame, surface_index, "fuel")
-  build_priority_section(frame, surface_index, "ammo")
+  local active_tab = storage.alc_open_tab[player.index] or "ammo"
+  build_tab_bar(frame, active_tab)
+  local content = frame.add{
+    type = "frame",
+    direction = "vertical",
+    style = "inside_shallow_frame_with_padding",
+  }
+  build_priority_section(content, surface_index, active_tab)
 end
 
 local function destroy_gui_for_player(player)
@@ -727,47 +748,58 @@ local function on_gui_click(event)
   local tags = element.tags
   if not tags then return end
   local action = tags.alc_action
-  if action ~= "up" and action ~= "down" then return end
-  local category = tags.category
-  local idx = tags.idx
-  if not (category and idx) then return end
-  local surface_index = storage.alc_open_chest[event.player_index]
-  if not surface_index then return end
-  local v = storage.virtual[surface_index]
-  if not v then return end
-  local order = v[category .. "_order"]
-  if not order then return end
-  local n = #order
-  if action == "up" then
-    if idx > 1 then
-      order[idx - 1], order[idx] = order[idx], order[idx - 1]
-    end
-  else
-    if idx < n then
-      order[idx + 1], order[idx] = order[idx], order[idx + 1]
-    end
-  end
-  local player = game.get_player(event.player_index)
-  if player then build_gui_for_player(player, surface_index) end
-end
+  if not action then return end
 
-local function on_gui_selection_state_changed(event)
-  local element = event.element
-  if not (element and element.valid) then return end
-  local tags = element.tags
-  if not tags then return end
-  if tags.alc_action ~= "strategy" then return end
-  local category = tags.category
-  local item = tags.item
-  if not (category and item) then return end
+  local player = game.get_player(event.player_index)
+
+  if action == "tab" then
+    local tab = tags.tab
+    if tab ~= "fuel" and tab ~= "ammo" then return end
+    storage.alc_open_tab[event.player_index] = tab
+    local surface_index = storage.alc_open_chest[event.player_index]
+    if player and surface_index then build_gui_for_player(player, surface_index) end
+    return
+  end
+
   local surface_index = storage.alc_open_chest[event.player_index]
   if not surface_index then return end
   local v = storage.virtual[surface_index]
   if not v then return end
-  local entry = v[category][item]
-  if not entry then return end
-  local strategy_name = STRATEGY_NAMES[element.selected_index]
-  if strategy_name then entry.strategy = strategy_name end
+
+  if action == "up" or action == "down" then
+    local category = tags.category
+    local idx = tags.idx
+    if not (category and idx) then return end
+    local order = v[category .. "_order"]
+    if not order then return end
+    local n = #order
+    if action == "up" then
+      if idx > 1 then
+        order[idx - 1], order[idx] = order[idx], order[idx - 1]
+      end
+    else
+      if idx < n then
+        order[idx + 1], order[idx] = order[idx], order[idx + 1]
+      end
+    end
+    if player then build_gui_for_player(player, surface_index) end
+    return
+  end
+
+  if action == "strategy_cycle" then
+    local category = tags.category
+    local item = tags.item
+    if not (category and item) then return end
+    local entry = v[category][item]
+    if not entry then return end
+    local cur = STRATEGY_NAME_TO_INDEX[entry.strategy] or 1
+    local n = #STRATEGY_NAMES
+    local dir = (event.button == defines.mouse_button_type.right) and -1 or 1
+    local next_idx = ((cur - 1 + dir) % n) + 1
+    entry.strategy = STRATEGY_NAMES[next_idx]
+    if player then build_gui_for_player(player, surface_index) end
+    return
+  end
 end
 
 -- ── Lifecycle ────────────────────────────────────────────────────────────
@@ -842,4 +874,3 @@ end)
 script.on_event(defines.events.on_gui_opened,                    on_gui_opened)
 script.on_event(defines.events.on_gui_closed,                    on_gui_closed)
 script.on_event(defines.events.on_gui_click,                     on_gui_click)
-script.on_event(defines.events.on_gui_selection_state_changed,   on_gui_selection_state_changed)
