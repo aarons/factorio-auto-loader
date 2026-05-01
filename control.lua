@@ -33,14 +33,15 @@ end
 local function reset_storage()
   storage.chests_by_surface         = {}
   storage.shared_chest              = {}
+  storage.chest_surface             = {}
   storage.consumer_queue            = {}
   storage.consumer_queue_size       = {}
   storage.consumer_cursor           = {}
   storage.consumers                 = {}
   storage.consumer_counts           = {}
-  storage.destroy_registry          = {}
   storage.surface_list              = {}
   storage.surface_list_cursor       = 1
+  storage.destroy_registry          = nil
 end
 
 -- surface_list is the round-robin axis for on_step: each step resumes at
@@ -101,15 +102,11 @@ local function register_chest(entity)
   local chests = storage.chests_by_surface[surface_index]
   if chests[unit_number] then return end
   chests[unit_number] = entity
+  storage.chest_surface[unit_number] = surface_index
   if not storage.shared_chest[surface_index] then
     storage.shared_chest[surface_index] = entity
   end
-  local reg_num = script.register_on_object_destroyed(entity)
-  storage.destroy_registry[reg_num] = {
-    unit_number   = unit_number,
-    kind          = "chest",
-    surface_index = surface_index,
-  }
+  script.register_on_object_destroyed(entity)
 end
 
 -- All chests on a surface share one linked-container inventory, so any valid
@@ -122,12 +119,12 @@ local function get_shared_inventory(surface_index)
   end
   local chests = storage.chests_by_surface[surface_index]
   if not chests then return nil end
-  for un, entity in pairs(chests) do
+  for unit_number, entity in pairs(chests) do
     if entity.valid then
       storage.shared_chest[surface_index] = entity
       return entity.get_inventory(defines.inventory.chest)
     else
-      chests[un] = nil
+      chests[unit_number] = nil
     end
   end
   storage.shared_chest[surface_index] = nil
@@ -170,60 +167,73 @@ local function try_register_consumer(entity)
   if storage.consumers[unit_number] then return end
 
   local has_fuel = entity.get_fuel_inventory() ~= nil
-  local idx      = AMMO_INVENTORY[entity.type]
-  local ammo_inv = idx and entity.get_inventory(idx)
-  local has_ammo = ammo_inv ~= nil and #ammo_inv > 0
-  if not (has_fuel or has_ammo) then return end
+  local ammo_idx = AMMO_INVENTORY[entity.type]
+  if ammo_idx then
+    local ammo_inv = entity.get_inventory(ammo_idx)
+    if not (ammo_inv and #ammo_inv > 0) then ammo_idx = nil end
+  end
+  if not (has_fuel or ammo_idx) then return end
 
   local surface_index = entity.surface.index
   init_surface(surface_index)
-  local queue = storage.consumer_queue[surface_index]
-  local size  = storage.consumer_queue_size[surface_index] + 1
-  queue[size] = unit_number
-  storage.consumer_queue_size[surface_index] = size
-  storage.consumers[unit_number] = entity
-  local counts = storage.consumer_counts[surface_index]
-  if has_fuel then counts.fuel = counts.fuel + 1 end
-  if has_ammo then counts.ammo = counts.ammo + 1 end
-  local reg_num = script.register_on_object_destroyed(entity)
-  storage.destroy_registry[reg_num] = {
+
+  -- Same consumer record is shared between the queue (round-robin
+  -- iteration) and storage.consumers[unit_number] (O(1) dedup at
+  -- registration plus lookup in the destroy handler). Caching ammo_idx
+  -- and has_fuel here keeps the fill path off the
+  -- AMMO_INVENTORY[entity.type] / get_fuel_inventory() boundary calls.
+  local consumer = {
+    entity        = entity,
     unit_number   = unit_number,
-    kind          = "consumer",
     surface_index = surface_index,
     has_fuel      = has_fuel,
-    has_ammo      = has_ammo,
+    ammo_idx      = ammo_idx,
   }
+
+  local queue = storage.consumer_queue[surface_index]
+  local size  = storage.consumer_queue_size[surface_index] + 1
+  queue[size] = consumer
+  storage.consumer_queue_size[surface_index] = size
+  storage.consumers[unit_number] = consumer
+  local counts = storage.consumer_counts[surface_index]
+  if has_fuel then counts.fuel = counts.fuel + 1 end
+  if ammo_idx then counts.ammo = counts.ammo + 1 end
+  script.register_on_object_destroyed(entity)
 
   -- Instant-fill at placement so a freshly-built turret doesn't sit empty
   -- while waiting for the cursor to come around. Uses the same smooth-cap
   -- path as on_step, so under scarcity it only takes a fair share.
   local shared_inv = get_shared_inventory(surface_index)
   if shared_inv and not shared_inv.is_empty() then
-    fill_consumer(entity, build_step_context(shared_inv), counts)
+    fill_consumer(consumer, build_step_context(shared_inv), counts)
   end
 end
 
-local function unregister_destroyed(reg_num)
-  local entry = storage.destroy_registry[reg_num]
-  if not entry then return end
-  storage.destroy_registry[reg_num] = nil
-  if entry.kind == "chest" then
-    local chests = storage.chests_by_surface[entry.surface_index]
-    if chests then chests[entry.unit_number] = nil end
-    local cached = storage.shared_chest[entry.surface_index]
-    if cached and (not cached.valid or cached.unit_number == entry.unit_number) then
-      storage.shared_chest[entry.surface_index] = nil
-    end
-  else
-    storage.consumers[entry.unit_number] = nil
-    local counts = storage.consumer_counts[entry.surface_index]
+local function on_object_destroyed(event)
+  -- We only ever register entities, so useful_id is the unit_number. The
+  -- queue slot for a destroyed consumer is left for the fill loop to
+  -- swap-pop on next visit; rewriting the array here would be O(n).
+  local unit_number = event.useful_id
+  local consumer = storage.consumers[unit_number]
+  if consumer then
+    storage.consumers[unit_number] = nil
+    local counts = storage.consumer_counts[consumer.surface_index]
     if counts then
-      if entry.has_fuel then counts.fuel = counts.fuel - 1 end
-      if entry.has_ammo then counts.ammo = counts.ammo - 1 end
+      if consumer.has_fuel then counts.fuel = counts.fuel - 1 end
+      if consumer.ammo_idx then counts.ammo = counts.ammo - 1 end
     end
-    -- Queue slot is left orphaned on purpose; the fill loop swap-pops
-    -- it on next visit. Rewriting the array here would be O(n) per
-    -- removal.
+    return
+  end
+
+  local surface_index = storage.chest_surface[unit_number]
+  if surface_index then
+    storage.chest_surface[unit_number] = nil
+    local chests = storage.chests_by_surface[surface_index]
+    if chests then chests[unit_number] = nil end
+    local cached = storage.shared_chest[surface_index]
+    if cached and (not cached.valid or cached.unit_number == unit_number) then
+      storage.shared_chest[surface_index] = nil
+    end
   end
 end
 
@@ -249,11 +259,13 @@ local function clear_surface(surface_index)
   local size  = storage.consumer_queue_size[surface_index] or 0
   if queue then
     for i = 1, size do
-      local unit_number = queue[i]
-      if unit_number then
-        storage.consumers[unit_number] = nil
-      end
+      local consumer = queue[i]
+      if consumer then storage.consumers[consumer.unit_number] = nil end
     end
+  end
+  local chests = storage.chests_by_surface[surface_index]
+  if chests then
+    for unit_number in pairs(chests) do storage.chest_surface[unit_number] = nil end
   end
   storage.chests_by_surface[surface_index]         = nil
   storage.shared_chest[surface_index]              = nil
@@ -262,11 +274,6 @@ local function clear_surface(surface_index)
   storage.consumer_cursor[surface_index]           = nil
   storage.consumer_counts[surface_index]           = nil
   remove_surface_from_list(surface_index)
-  for reg_num, entry in pairs(storage.destroy_registry) do
-    if entry.surface_index == surface_index then
-      storage.destroy_registry[reg_num] = nil
-    end
-  end
 end
 
 local function fill_one_inventory(consumer_inv, ctx, consumer_count)
@@ -318,13 +325,16 @@ local function fill_one_inventory(consumer_inv, ctx, consumer_count)
   end
 end
 
-fill_consumer = function(entity, ctx, counts)
-  local fuel_inv = entity.get_fuel_inventory()
-  if fuel_inv then fill_one_inventory(fuel_inv, ctx, counts.fuel) end
-
-  local idx = AMMO_INVENTORY[entity.type]
-  local ammo_inv = idx and entity.get_inventory(idx)
-  if ammo_inv then fill_one_inventory(ammo_inv, ctx, counts.ammo) end
+fill_consumer = function(consumer, ctx, counts)
+  local entity = consumer.entity
+  if consumer.has_fuel then
+    local fuel_inv = entity.get_fuel_inventory()
+    if fuel_inv then fill_one_inventory(fuel_inv, ctx, counts.fuel) end
+  end
+  if consumer.ammo_idx then
+    local ammo_inv = entity.get_inventory(consumer.ammo_idx)
+    if ammo_inv then fill_one_inventory(ammo_inv, ctx, counts.ammo) end
+  end
 end
 
 local function on_step()
@@ -361,19 +371,18 @@ local function on_step()
         local cycle_complete = false
 
         while processed < batch_size and n > 0 do
-          local unit_number = queue[cursor]
-          local entity = unit_number and consumers[unit_number]
-          if entity and entity.valid then
-            fill_consumer(entity, ctx, counts)
+          local consumer = queue[cursor]
+          if consumer and consumer.entity.valid then
+            fill_consumer(consumer, ctx, counts)
             processed = processed + 1
             cursor = cursor + 1
           else
             -- Orphan: swap-pop with the last live entry. Cursor stays
-            -- put so the next iteration picks up the entity we just
-            -- swapped in. Avoids leaving nil holes that would make
-            -- `#queue` return an arbitrary border.
-            if unit_number then
-              consumers[unit_number] = nil
+            -- put so the next iteration picks up the entry we just
+            -- swapped in. Belt-and-suspenders consumers[unit_number] = nil
+            -- covers a missed destroy event (replays, mod meddling).
+            if consumer and consumers[consumer.unit_number] == consumer then
+              consumers[consumer.unit_number] = nil
             end
             queue[cursor] = queue[n]
             queue[n] = nil
@@ -464,9 +473,7 @@ script.on_event(defines.events.script_raised_built,            on_built)
 script.on_event(defines.events.script_raised_revive,           on_built)
 script.on_event(defines.events.on_entity_cloned,               on_cloned)
 
-script.on_event(defines.events.on_object_destroyed, function(event)
-  unregister_destroyed(event.registration_number)
-end)
+script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
 
 local function on_player_character_event(event)
   local player = game.get_player(event.player_index)
