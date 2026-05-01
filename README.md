@@ -72,63 +72,28 @@ Fair-share still applies: when stock is low relative to the number of
 consumers, each visit takes a smaller slice so everyone gets a turn
 before the first few top up to `max-fill`.
 
+## Optimizations to Consider for UPS
 
-## Optimizations to COnsider for UPS
+Cache fuel_inv and ammo_inv references on the consumer record.
+get_fuel_inventory() / get_inventory() are called every visit. LuaInventory references are stable as long as the entity is valid, so store them in
+storage.consumers[unit_number] at registration time (alongside the entity). Skip the API calls in fill_consumer entirely.
 
-  Where the time is going
+Stash {has_fuel, ammo_idx} (and optionally the fuel/ammo inventory refs in a runtime-only table rebuilt in on_load from storage.consumers)
+so fill_consumer doesn't call get_fuel_inventory() + get_inventory(idx) every visit. Already tracking has_fuel/has_ammo in destroy_registry
+ — promote to storage.consumers[un] = {entity=…, ammo_idx=…, has_fuel=…}.
 
-  The hot path is on_step → fill_consumer → fill_one_inventory, running every tick by default. Per surface, per visited consumer (×10 by default), per inventory (fuel +
-  ammo), the inner loop touches the shared inventory once per consumer:
+Replace get_item_count{} with a per-consumer contents snapshot.
+For each consumer inventory, one get_contents() per visit beats N get_item_count{} calls (one per slot). Build a current[name|quality] = count dict once, decrement in Lua as you insert. Eliminates ~N table allocs per consumer per inventory.
 
-  1. shared_inv.get_contents() — full snapshot allocated, then a totals dict built with name .. "|" .. quality keys (string allocs in a hot loop).
-  2. for i = 1, #shared_inv do — every slot, even empties. Each iteration hits stack.valid_for_read, stack.name, stack.quality.name, stack.count — each is a Lua↔C++
-  boundary cross.
-  3. consumer_inv.get_item_count{ name=..., quality=... } — allocates a table per slot, per consumer, every tick.
-  4. consumer_inv.insert{...} and entity.get_fuel_inventory() / entity.get_inventory() — more boundary crossings every visit.
+Skip empty/known-full consumers cheaply.
+Currently is_full() short-circuits the outer check, but a turret with one bullet of nine ammo types is "not full" and re-scans the whole shared inventory. Track per-consumer per-item "filled to cap" state, or at least short-circuit the slot loop the moment cap - current <= 0 for everything in the snapshot. Combined with (A), the all-topped-up case becomes ~free.
 
-  For a moderate base (say ~200 turrets, batch=10, ~48-slot linked container), each tick is ~10 × 2 × 48 ≈ ~1000 boundary crosses just for the slot scan, plus ~10 × 2 = 20
-  get_contents() snapshots. That comports with the 1.7 ms average you're seeing.
+Avoid scanning unused slots.
+If the linked container has 48 slots but only 5 are used, the for i = 1, size loop pays 48 iterations. After (A), the snapshot can store only filled slots, so the per-consumer loop is #snapshot (=5), not #shared_inv (=48). Big multiplier on sparse chests.
 
-  Strategies, ranked by likely impact
+Quality string normalization once per snapshot.
+stack.quality and stack.quality.name or "normal" is done per-slot per-consumer today. After (A), it happens once per slot in the snapshot.
 
-  A. Hoist shared-inventory work out of the per-consumer loop (biggest win).
-  fill_one_inventory rebuilds totals and re-walks the shared inventory's slots for every consumer, but the shared inventory is the same for all consumers on a surface
-  within a tick. Build a per-tick Lua snapshot once: [{slot_index, name, quality, count}, ...] plus the totals dict. Per-consumer loop reads/writes through the snapshot,
-  and we only call shared_inv[i].count = … when an insert actually succeeds. Should cut shared-side boundary crosses by ~10× (= batch_size).
+Drop the totals[...] string concat key.
+Use a nested table totals[name][quality] = count instead of name .. "|" .. quality. Eliminates per-lookup string allocation. Minor but free.
 
-  B. Cache fuel_inv and ammo_inv references on the consumer record.
-  get_fuel_inventory() / get_inventory() are called every visit. LuaInventory references are stable as long as the entity is valid, so store them in
-  storage.consumers[unit_number] at registration time (alongside the entity). Skip the API calls in fill_consumer entirely.
-
-  C. Replace get_item_count{} with a per-consumer contents snapshot.
-  For each consumer inventory, one get_contents() per visit beats N get_item_count{} calls (one per slot). Build a current[name|quality] = count dict once, decrement in Lua
-   as you insert. Eliminates ~N table allocs per consumer per inventory.
-
-  D. Skip empty/known-full consumers cheaply.
-  Currently is_full() short-circuits the outer check, but a turret with one bullet of nine ammo types is "not full" and re-scans the whole shared inventory. Track
-  per-consumer per-item "filled to cap" state, or at least short-circuit the slot loop the moment cap - current <= 0 for everything in the snapshot. Combined with (A), the
-  all-topped-up case becomes ~free.
-
-  E. Spread cost across more ticks.
-  The default tick_interval=1, batch=10 means 10 consumers/tick. Setting tick_interval=6, batch=60 gives the same throughput but the event handler fires 6× less often (and
-  on_nth_tick itself has overhead). Doesn't help avg ms/tick directly but reduces variance and the fixed per-call overhead. This is a config choice, not a code change — but
-   worth documenting.
-
-  F. Avoid scanning unused slots.
-  If the linked container has 48 slots but only 5 are used, the for i = 1, size loop pays 48 iterations. After (A), the snapshot can store only filled slots, so the
-  per-consumer loop is #snapshot (=5), not #shared_inv (=48). Big multiplier on sparse chests.
-
-  G. Quality string normalization once per snapshot.
-  stack.quality and stack.quality.name or "normal" is done per-slot per-consumer today. After (A), it happens once per slot in the snapshot.
-
-  H. Drop the totals[...] string concat key.
-  Use a nested table totals[name][quality] = count instead of name .. "|" .. quality. Eliminates per-lookup string allocation. Minor but free.
-
-  What I'd touch first
-
-  (A) + (B) + (C) together are the structural wins — they're the same code change, basically: pre-build a snapshot once per surface per tick, and cache inventory refs at
-  registration. I'd expect that alone to halve or better the avg ms/tick. (D) is the next step if you have lots of turrets that mostly sit idle. (E) is a settings tweak you
-   could ship as a recommendation in the README.
-
-  One non-obvious risk to flag: caching LuaInventory references means the validity guard becomes "is the entity still valid" — same lifetime, but worth verifying behavior
-  under entity teleportation/space-platform travel before shipping.

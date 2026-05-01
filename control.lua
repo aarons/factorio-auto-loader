@@ -39,6 +39,35 @@ local function reset_storage()
   storage.consumers                 = {}
   storage.consumer_counts           = {}
   storage.destroy_registry          = {}
+  storage.surface_list              = {}
+  storage.surface_list_cursor       = 1
+end
+
+-- surface_list is the round-robin axis for on_step: each step resumes at
+-- surface_list_cursor and processes up to batch_size consumer-fills total
+-- across surfaces, advancing the cursor only after a surface's per-surface
+-- queue has been fully cycled this step.
+local function add_surface_to_list(surface_index)
+  local list = storage.surface_list
+  for i = 1, #list do
+    if list[i] == surface_index then return end
+  end
+  list[#list + 1] = surface_index
+end
+
+local function remove_surface_from_list(surface_index)
+  local list = storage.surface_list
+  local n = #list
+  for i = 1, n do
+    if list[i] == surface_index then
+      list[i] = list[n]
+      list[n] = nil
+      if storage.surface_list_cursor > n - 1 then
+        storage.surface_list_cursor = 1
+      end
+      return
+    end
+  end
 end
 
 local function init_surface(surface_index)
@@ -57,6 +86,7 @@ local function init_surface(surface_index)
   if not storage.consumer_counts[surface_index] then
     storage.consumer_counts[surface_index] = { ammo = 0, fuel = 0 }
   end
+  add_surface_to_list(surface_index)
 end
 
 local function register_chest(entity)
@@ -104,6 +134,36 @@ local function get_shared_inventory(surface_index)
   return nil
 end
 
+-- Build a per-step shared-inventory snapshot once, then reuse it across
+-- every consumer on this surface. Without this, fill_one_inventory would
+-- re-call get_contents() and re-iterate every shared_inv slot per consumer
+-- per inventory — O(consumers * slots) Lua<->C++ boundary crossings every
+-- tick. ctx.slots holds each occupied stack with cached name/quality strings
+-- and a mutable count we decrement as we insert; ctx.totals is the
+-- cross-slot aggregate that drives fair-share. Both stay in sync with the
+-- live shared_inv as the step progresses.
+local function build_step_context(shared_inv)
+  local totals = {}
+  local slots = {}
+  local n = 0
+  local size = #shared_inv
+  for i = 1, size do
+    local stack = shared_inv[i]
+    if stack.valid_for_read then
+      local name = stack.name
+      local quality = stack.quality and stack.quality.name or "normal"
+      local key = name .. "|" .. quality
+      local count = stack.count
+      n = n + 1
+      slots[n] = {
+        stack = stack, name = name, quality = quality, key = key, count = count,
+      }
+      totals[key] = (totals[key] or 0) + count
+    end
+  end
+  return { totals = totals, slots = slots, slot_count = n }
+end
+
 local function try_register_consumer(entity)
   local unit_number = entity.unit_number
   if not unit_number then return end
@@ -139,7 +199,7 @@ local function try_register_consumer(entity)
   -- path as on_step, so under scarcity it only takes a fair share.
   local shared_inv = get_shared_inventory(surface_index)
   if shared_inv and not shared_inv.is_empty() then
-    fill_consumer(entity, shared_inv, counts)
+    fill_consumer(entity, build_step_context(shared_inv), counts)
   end
 end
 
@@ -201,6 +261,7 @@ local function clear_surface(surface_index)
   storage.consumer_queue_size[surface_index]       = nil
   storage.consumer_cursor[surface_index]           = nil
   storage.consumer_counts[surface_index]           = nil
+  remove_surface_from_list(surface_index)
   for reg_num, entry in pairs(storage.destroy_registry) do
     if entry.surface_index == surface_index then
       storage.destroy_registry[reg_num] = nil
@@ -208,46 +269,48 @@ local function clear_surface(surface_index)
   end
 end
 
-local function fill_one_inventory(consumer_inv, shared_inv, consumer_count)
+local function fill_one_inventory(consumer_inv, ctx, consumer_count)
   if not consumer_inv or consumer_inv.is_full() then return end
 
-  -- Per-item totals across the whole shared inventory. Fair-share divides
-  -- by the surface-wide stock so a single item split across multiple slots
-  -- (e.g. for filter pinning) is still treated as one pool for scarcity.
-  local totals = {}
-  for _, entry in ipairs(shared_inv.get_contents()) do
-    totals[entry.name .. "|" .. (entry.quality or "normal")] = entry.count
+  -- Aggregate the consumer's current contents in one boundary crossing
+  -- instead of a per-slot get_item_count{...} below.
+  local current = {}
+  for _, entry in ipairs(consumer_inv.get_contents()) do
+    current[entry.name .. "|" .. (entry.quality or "normal")] = entry.count
   end
 
   -- Slot-order iteration is the priority knob: earlier slots are pulled
   -- first. Players use the chest's filter slots to pin specific ammo or
   -- fuel to the front (e.g. uranium in slot 1, piercing in slot 2) and
   -- this loop honors that order.
-  local size = #shared_inv
-  for i = 1, size do
-    local stack = shared_inv[i]
-    if stack.valid_for_read then
-      local name = stack.name
-      local quality = stack.quality and stack.quality.name or "normal"
+  local slots = ctx.slots
+  local totals = ctx.totals
+  for i = 1, ctx.slot_count do
+    local slot = slots[i]
+    local available = slot.count
+    if available > 0 then
+      local key = slot.key
       -- Smooth fair-share: when this item is scarce relative to the
       -- consumer pool, shrink the per-visit cap so everyone gets a turn
       -- before the first few hoard up to max_fill. Floor of zero is
       -- bumped to 1 so a starving consumer still gets at least one unit
       -- if any stock exists.
-      local cap = max_fill
-      local total = totals[name .. "|" .. quality] or stack.count
+      local total = totals[key]
       local share = math.floor(total / consumer_count)
       if share < 1 then share = 1 end
-      if share < cap then cap = share end
-      local current = consumer_inv.get_item_count{ name = name, quality = quality }
-      local want = cap - current
+      local cap = max_fill < share and max_fill or share
+      local have = current[key] or 0
+      local want = cap - have
       if want > 0 then
-        local to_insert = stack.count < want and stack.count or want
+        local to_insert = available < want and available or want
         local inserted = consumer_inv.insert{
-          name = name, count = to_insert, quality = quality,
+          name = slot.name, count = to_insert, quality = slot.quality,
         }
         if inserted > 0 then
-          stack.count = stack.count - inserted
+          slot.stack.count = slot.stack.count - inserted
+          slot.count = available - inserted
+          totals[key] = total - inserted
+          current[key] = have + inserted
         end
       end
       if consumer_inv.is_full() then return end
@@ -255,35 +318,56 @@ local function fill_one_inventory(consumer_inv, shared_inv, consumer_count)
   end
 end
 
-fill_consumer = function(entity, shared_inv, counts)
+fill_consumer = function(entity, ctx, counts)
   local fuel_inv = entity.get_fuel_inventory()
-  if fuel_inv then fill_one_inventory(fuel_inv, shared_inv, counts.fuel) end
+  if fuel_inv then fill_one_inventory(fuel_inv, ctx, counts.fuel) end
 
   local idx = AMMO_INVENTORY[entity.type]
   local ammo_inv = idx and entity.get_inventory(idx)
-  if ammo_inv then fill_one_inventory(ammo_inv, shared_inv, counts.ammo) end
+  if ammo_inv then fill_one_inventory(ammo_inv, ctx, counts.ammo) end
 end
 
 local function on_step()
-  for surface_index, queue in pairs(storage.consumer_queue) do
-    local shared_inv = get_shared_inventory(surface_index)
-    if shared_inv and not shared_inv.is_empty() then
-      local n = storage.consumer_queue_size[surface_index] or 0
-      if n > 0 then
+  local surface_list = storage.surface_list
+  local n_surfaces = #surface_list
+  if n_surfaces == 0 then return end
+
+  local sc = storage.surface_list_cursor
+  if sc < 1 or sc > n_surfaces then sc = 1 end
+
+  local consumers = storage.consumers
+  local processed = 0
+  local surfaces_visited = 0
+
+  -- Global round-robin: each step processes up to batch_size consumer-fills
+  -- in total, advancing through surface_list. We finish a surface's queue
+  -- cycle (or run out of budget) before advancing surface_list_cursor, so a
+  -- surface's per-surface cursor is preserved across steps. The
+  -- surfaces_visited cap stops us looping forever if every surface is empty
+  -- or has nothing to give.
+  while processed < batch_size and surfaces_visited < n_surfaces do
+    local surface_index = surface_list[sc]
+    local n = storage.consumer_queue_size[surface_index] or 0
+    local advance_surface = true
+
+    if n > 0 then
+      local shared_inv = get_shared_inventory(surface_index)
+      if shared_inv and not shared_inv.is_empty() then
+        local queue = storage.consumer_queue[surface_index]
+        local ctx = build_step_context(shared_inv)
         local cursor = storage.consumer_cursor[surface_index] or 1
         if cursor > n then cursor = 1 end
-        local processed = 0
-        local consumers = storage.consumers
         local counts = storage.consumer_counts[surface_index]
+        local cycle_complete = false
+
         while processed < batch_size and n > 0 do
-          if cursor > n then cursor = 1 end
           local unit_number = queue[cursor]
           local entity = unit_number and consumers[unit_number]
           if entity and entity.valid then
-            fill_consumer(entity, shared_inv, counts)
+            fill_consumer(entity, ctx, counts)
             processed = processed + 1
             cursor = cursor + 1
-          else -- entity is not valid or missing
+          else
             -- Orphan: swap-pop with the last live entry. Cursor stays
             -- put so the next iteration picks up the entity we just
             -- swapped in. Avoids leaving nil holes that would make
@@ -295,12 +379,30 @@ local function on_step()
             queue[n] = nil
             n = n - 1
           end
+
+          if cursor > n then
+            cursor = 1
+            cycle_complete = true
+            break
+          end
         end
+
         storage.consumer_queue_size[surface_index] = n
         storage.consumer_cursor[surface_index] = cursor
+        advance_surface = cycle_complete or n == 0
       end
     end
+
+    if advance_surface then
+      sc = sc + 1
+      if sc > n_surfaces then sc = 1 end
+      surfaces_visited = surfaces_visited + 1
+    else
+      break
+    end
   end
+
+  storage.surface_list_cursor = sc
 end
 
 local function refresh_settings()
