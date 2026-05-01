@@ -208,14 +208,13 @@ local function register_chest(entity)
     cc_red:connect_to(chest_red,     false, defines.wire_origin.script)
     cc_green:connect_to(chest_green, false, defines.wire_origin.script)
     -- One section is enough — the update path always writes to section 1.
-    cc.get_or_create_control_behavior():add_section()
-    storage.cc_by_chest[unit_number] = cc
     -- Seed with the surface's current virtual contents: another chest on
     -- this surface may have already accumulated stock before this one was
     -- placed. Assign filters directly to this single section instead of
     -- re-walking every chest on the surface.
-    local section = cc.get_or_create_control_behavior().get_section(1)
+    local section = cc.get_or_create_control_behavior():add_section()
     if section then section.filters = build_filters_for_surface(surface_index) end
+    storage.cc_by_chest[unit_number] = cc
   end
 end
 
@@ -360,7 +359,7 @@ build_filters_for_surface = function(surface_index)
   local v = storage.virtual[surface_index]
   if not v then return {} end
   local out, k = {}, 0
-  for _, category in pairs({ v.fuel, v.ammo }) do
+  for _, category in ipairs({ v.fuel, v.ammo }) do
     for name, entry in pairs(category) do
       for quality, count in pairs(entry.totals) do
         if count > 0 then
