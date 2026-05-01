@@ -657,9 +657,10 @@ local function build_priority_section(parent, surface_index, category_key)
       items_table.add{
         type = "sprite-button",
         sprite = "item/" .. name,
-        tooltip = localised_item_name(name),
+        tooltip = { "alc.take-stack-tooltip", localised_item_name(name) },
         number = total,
         style = "slot_button",
+        tags = { alc_action = "take_stack", category = category_key, item = name },
       }
       local arrows = items_table.add{ type = "flow", direction = "horizontal" }
       arrows.style.horizontal_spacing = 0
@@ -783,6 +784,56 @@ local function on_gui_click(event)
       end
     end
     if player then build_gui_for_player(player, surface_index) end
+    return
+  end
+
+  if action == "take_stack" then
+    local category = tags.category
+    local item_name = tags.item
+    if not (category and item_name and player) then return end
+    local entry = v[category][item_name]
+    if not entry then return end
+    local proto = prototypes.item[item_name]
+    if not proto then return end
+    local cursor = player.cursor_stack
+    if not cursor then return end
+
+    local q_order = quality_order_for(entry)
+    local quality
+    for i = 1, #q_order do
+      if (entry.totals[q_order[i]] or 0) > 0 then
+        quality = q_order[i]
+        break
+      end
+    end
+    if not quality then
+      if player then build_gui_for_player(player, surface_index) end
+      return
+    end
+
+    local available = entry.totals[quality]
+    local stack_size = proto.stack_size
+    local to_take
+    if cursor.valid_for_read then
+      if cursor.name ~= item_name or cursor.quality.name ~= quality then return end
+      local space = stack_size - cursor.count
+      if space <= 0 then return end
+      to_take = available < space and available or space
+      cursor.count = cursor.count + to_take
+    else
+      to_take = available < stack_size and available or stack_size
+      if not cursor.set_stack{ name = item_name, count = to_take, quality = quality } then
+        return
+      end
+    end
+
+    if to_take >= available then
+      entry.totals[quality] = nil
+    else
+      entry.totals[quality] = available - to_take
+    end
+
+    build_gui_for_player(player, surface_index)
     return
   end
 
