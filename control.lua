@@ -15,6 +15,23 @@ local AMMO_INVENTORY = {
 
 local CHEST_NAME = "auto-loader-chest-linked"
 
+-- Item-kind sets, populated from prototypes once at startup and refreshed
+-- on_configuration_changed. Mutated in place so closures over them stay valid.
+local FUEL_ITEMS = {}
+local AMMO_ITEMS = {}
+
+local function rebuild_item_kind_sets()
+  for k in pairs(FUEL_ITEMS) do FUEL_ITEMS[k] = nil end
+  for k in pairs(AMMO_ITEMS) do AMMO_ITEMS[k] = nil end
+  for name, proto in pairs(prototypes.item) do
+    if proto.type == "ammo" then
+      AMMO_ITEMS[name] = true
+    elseif proto.fuel_category then
+      FUEL_ITEMS[name] = true
+    end
+  end
+end
+
 -- All chests on the same surface share one logical inventory via
 -- LuaEntity.link_id. We hash a per-surface id off the surface NAME (stable
 -- across save/load — surface indices aren't) so reloads don't relink chests
@@ -122,29 +139,6 @@ local function get_shared_inventory(surface_index)
   return nil
 end
 
--- Item-kind classification cache: name -> "fuel" | "ammo" | false. Derived
--- from prototypes.item[name] (immutable for the session). An item is fuel
--- XOR ammo — Factorio doesn't ship items that are both, so we don't pay
--- complexity for the mythical case. Module-local so on_configuration_changed
--- naturally invalidates it via reload; never persist in storage.
-local kind_cache = {}
-
-local function classify_item(name)
-  local cached = kind_cache[name]
-  if cached ~= nil then return cached end
-  local proto = prototypes.item[name]
-  local kind = false
-  if proto then
-    if proto.type == "ammo" then
-      kind = "ammo"
-    elseif proto.fuel_category then
-      kind = "fuel"
-    end
-  end
-  kind_cache[name] = kind
-  return kind
-end
-
 -- Per-step plan for one surface. Walks shared_inv once, partitions occupied
 -- slots into fuel_slots / ammo_slots in chest-slot order (filter slot 1
 -- first → priority pull) and records the original total per item.
@@ -166,22 +160,22 @@ local function build_step_context(shared_inv)
   for i = 1, size do
     local stack = shared_inv[i]
     if stack.valid_for_read then
-      local kind = classify_item(stack.name)
-      if kind then
-        local name = stack.name
-        local quality = stack.quality and stack.quality.name or "normal"
+      local name = stack.name
+      local bucket, n
+      if AMMO_ITEMS[name] then
+        ammo_n = ammo_n + 1
+        bucket, n = ammo_slots, ammo_n
+      elseif FUEL_ITEMS[name] then
+        fuel_n = fuel_n + 1
+        bucket, n = fuel_slots, fuel_n
+      end
+      if bucket then
+        local quality = stack.quality.name
         local key = name .. "|" .. quality
         local count = stack.count
-        local slot = {
+        bucket[n] = {
           stack = stack, name = name, quality = quality, key = key, count = count,
         }
-        if kind == "ammo" then
-          ammo_n = ammo_n + 1
-          ammo_slots[ammo_n] = slot
-        else
-          fuel_n = fuel_n + 1
-          fuel_slots[fuel_n] = slot
-        end
         totals[key] = (totals[key] or 0) + count
       end
     end
@@ -476,6 +470,7 @@ local function scan_all_surfaces()
 end
 
 script.on_init(function()
+  rebuild_item_kind_sets()
   reset_storage()
   scan_all_surfaces()
   refresh_settings()
@@ -483,6 +478,7 @@ script.on_init(function()
 end)
 
 script.on_configuration_changed(function()
+  rebuild_item_kind_sets()
   reset_storage()
   scan_all_surfaces()
   refresh_settings()
@@ -490,6 +486,7 @@ script.on_configuration_changed(function()
 end)
 
 script.on_load(function()
+  rebuild_item_kind_sets()
   refresh_settings()
   reapply_on_nth_tick()
 end)
