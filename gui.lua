@@ -78,8 +78,17 @@ local function populate_priority_table(items_table, v, category_key)
       local arrows = items_table.add{ type = "flow", direction = "horizontal" }
       arrows.style.horizontal_spacing = 0
       arrows.add{
+        type = "button",
+        caption = "⏫",
+        tooltip = { "alc.move-to-top" },
+        tags = { alc_action = "top", category = category_key, idx = idx },
+        enabled = (idx > 1),
+        style = "tool_button",
+      }
+      arrows.add{
         type = "sprite-button",
         sprite = "utility/speed_up",
+        tooltip = { "alc.move-up" },
         tags = { alc_action = "up", category = category_key, idx = idx },
         enabled = (idx > 1),
         style = "tool_button",
@@ -87,7 +96,16 @@ local function populate_priority_table(items_table, v, category_key)
       arrows.add{
         type = "sprite-button",
         sprite = "utility/speed_down",
+        tooltip = { "alc.move-down" },
         tags = { alc_action = "down", category = category_key, idx = idx },
+        enabled = (idx < #order),
+        style = "tool_button",
+      }
+      arrows.add{
+        type = "button",
+        caption = "⏬",
+        tooltip = { "alc.move-to-bottom" },
+        tags = { alc_action = "bottom", category = category_key, idx = idx },
         enabled = (idx < #order),
         style = "tool_button",
       }
@@ -231,7 +249,7 @@ function gui.on_gui_click(event)
   local v = storage.virtual[surface_index]
   if not v then return end
 
-  if action == "up" or action == "down" then
+  if action == "up" or action == "down" or action == "top" or action == "bottom" then
     local category = tags.category
     local idx = tags.idx
     if not (category and idx) then return end
@@ -242,9 +260,19 @@ function gui.on_gui_click(event)
       if idx > 1 then
         order[idx - 1], order[idx] = order[idx], order[idx - 1]
       end
-    else
+    elseif action == "down" then
       if idx < n then
         order[idx + 1], order[idx] = order[idx], order[idx + 1]
+      end
+    elseif action == "top" then
+      if idx > 1 then
+        local name = table.remove(order, idx)
+        table.insert(order, 1, name)
+      end
+    else -- bottom
+      if idx < n then
+        local name = table.remove(order, idx)
+        table.insert(order, name)
       end
     end
     if player then refresh_priority_items_for_player(player, surface_index) end

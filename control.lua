@@ -189,74 +189,24 @@ local function register_chest(entity)
   if cc then
     cc.destructible = false
     cc.operable     = false
-    -- Constant-combinator only exposes circuit_red / circuit_green
-    -- api: connect_to(target, reach_check?, origin?)
+    -- LuaWireConnector methods bind self via __index, so calling with `:`
+    -- double-passes self and the engine misreports the args as type errors.
+    -- Use dot syntax. reach_check=false because chest and CC are at the
+    -- exact same position so the default reach test would fail.
+    -- defines.wire_origin.script keeps the wire invisible and not
+    -- player-undoable.
     local chest_red   = entity.get_wire_connector(defines.wire_connector_id.circuit_red,   true)
     local chest_green = entity.get_wire_connector(defines.wire_connector_id.circuit_green, true)
     local cc_red      = cc.get_wire_connector(defines.wire_connector_id.circuit_red,       true)
     local cc_green    = cc.get_wire_connector(defines.wire_connector_id.circuit_green,     true)
-    local function describe(label, c)
-      if c == nil then
-        log(("alc-debug: %s = nil"):format(label))
-        return
-      end
-      log(("alc-debug: %s lua-type=%s object_name=%s valid=%s owner=%s wire_connector_id=%s wire_type=%s"):format(
-        label, type(c), tostring(c.object_name), tostring(c.valid),
-        tostring(c.owner and c.owner.name), tostring(c.wire_connector_id), tostring(c.wire_type)))
-    end
-    describe("chest_red",   chest_red)
-    describe("chest_green", chest_green)
-    describe("cc_red",      cc_red)
-    describe("cc_green",    cc_green)
-    log(("alc-debug: defines.wire_origin.script = %s (lua-type %s)"):format(
-      tostring(defines.wire_origin.script), type(defines.wire_origin.script)))
-    -- Probe: the engine throws on accessing unknown keys, so wrap each key
-    -- access in pcall before we even know if a method exists.
-    do
-      local ok_b, base_v = pcall(function() return script.active_mods.base end)
-      local ok_s, sa_v   = pcall(function() return script.active_mods["space-age"] end)
-      log(("alc-debug: base=%s space-age=%s"):format(
-        ok_b and tostring(base_v) or "<throw>",
-        ok_s and tostring(sa_v)   or "<throw>"))
-    end
-    local function probe_key(name)
-      local ok, val = pcall(function() return cc_red[name] end)
-      if not ok then
-        log(("alc-debug: cc_red.%s -> THROW: %s"):format(name, tostring(val)))
-      else
-        log(("alc-debug: cc_red.%s -> type=%s tostring=%s"):format(name, type(val), tostring(val)))
-      end
-    end
-    for _, k in ipairs({
-      "connect_to", "disconnect_from", "disconnect_all", "can_wire_reach",
-      "is_connected_to", "have_common_neighbour", "help",
-      "real_connections", "connections", "connection_count",
-    }) do probe_key(k) end
-    -- help() — if it exists — typically dumps every method with its real signature
-    local ok_help, help_text = pcall(function() return cc_red.help() end)
-    if ok_help then
-      log(("alc-debug: cc_red:help() = %s"):format(tostring(help_text)))
-    else
-      log(("alc-debug: cc_red:help() THROW: %s"):format(tostring(help_text)))
-    end
-    -- Test bool-first hypothesis. The engine keeps saying "bool expected" at
-    -- arg 1 regardless of what we pass, so let's actually pass a bool first.
-    local function try(label, fn)
-      local ok, err = pcall(fn)
-      log(("alc-debug: %s -> ok=%s result=%s"):format(label, tostring(ok), tostring(err)))
-    end
-    -- Hypothesis: __index returns a closure with self pre-bound, so `:`
-    -- double-passes self. Use `.` (dot) and supply explicit args only.
-    try("DOT connect_to(chest_red)",                       function() return cc_red.connect_to(chest_red) end)
-    try("DOT connect_to(chest_red, false)",                function() return cc_red.connect_to(chest_red, false) end)
-    try("DOT connect_to(chest_red, true, origin.script)",  function() return cc_red.connect_to(chest_red, true, defines.wire_origin.script) end)
-    try("DOT disconnect_all()",                            function() return cc_red.disconnect_all() end)
-    log(("alc-debug: AFTER DOT cc_red.connection_count=%s"):format(tostring(cc_red.connection_count)))
-    -- Seed with the surface's current virtual contents: another chest on
-    -- this surface may have already accumulated stock before this one was
-    -- placed. Assign filters directly to this single section instead of
-    -- re-walking every chest on the surface.
-    local section = cc.get_or_create_control_behavior():add_section()
+    cc_red.connect_to(chest_red,     false, defines.wire_origin.script)
+    cc_green.connect_to(chest_green, false, defines.wire_origin.script)
+    -- A freshly-created constant-combinator already has section 1; calling
+    -- add_section() returns nil and triggers "bad self" downstream.
+    -- enabled=true so the CC actually emits signals once filters are written.
+    local behaviour = cc.get_or_create_control_behavior()
+    behaviour.enabled = true
+    local section = behaviour.get_section(1)
     if section then section.filters = build_filters_for_surface(surface_index) end
     storage.cc_by_chest[unit_number] = cc
   end
