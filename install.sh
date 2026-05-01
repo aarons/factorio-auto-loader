@@ -8,6 +8,7 @@ NAME=$(/usr/bin/python3 -c 'import json; print(json.load(open("info.json"))["nam
 VERSION=$(/usr/bin/python3 -c 'import json; print(json.load(open("info.json"))["version"])')
 SLUG="${NAME}_${VERSION}"
 ZIP="${SLUG}.zip"
+ARCHIVE_DIR="$SCRIPT_DIR/archive"
 MODS_DIR="$HOME/Library/Application Support/factorio/mods"
 
 if [ ! -d "$MODS_DIR" ]; then
@@ -15,7 +16,12 @@ if [ ! -d "$MODS_DIR" ]; then
   exit 1
 fi
 
-rm -f "$ZIP"
+mkdir -p "$ARCHIVE_DIR"
+for existing in "$SCRIPT_DIR"/${NAME}_*.zip; do
+  [ -e "$existing" ] || continue
+  mv -f "$existing" "$ARCHIVE_DIR/"
+done
+
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
