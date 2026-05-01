@@ -637,6 +637,7 @@ local function build_priority_section(parent, surface_index, category_key)
 
   local scroll = parent.add{
     type = "scroll-pane",
+    name = "alc_scroll",
     vertical_scroll_policy = "auto-and-reserve-space",
     horizontal_scroll_policy = "never",
   }
@@ -691,7 +692,14 @@ end
 
 local function build_gui_for_player(player, surface_index)
   local relative = player.gui.relative
-  if relative[FRAME_NAME] then relative[FRAME_NAME].destroy() end
+  local saved_scroll
+  local existing = relative[FRAME_NAME]
+  if existing then
+    local old_content = existing.children[2]
+    local old_scroll = old_content and old_content.alc_scroll
+    if old_scroll then saved_scroll = old_scroll.scroll_position end
+    existing.destroy()
+  end
   local frame = relative.add{
     type = "frame",
     name = FRAME_NAME,
@@ -711,6 +719,10 @@ local function build_gui_for_player(player, surface_index)
     style = "inside_shallow_frame_with_padding",
   }
   build_priority_section(content, surface_index, active_tab)
+  if saved_scroll then
+    local new_scroll = content.alc_scroll
+    if new_scroll then new_scroll.scroll_position = saved_scroll end
+  end
 end
 
 local function destroy_gui_for_player(player)
