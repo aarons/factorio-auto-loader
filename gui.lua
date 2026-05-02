@@ -35,8 +35,12 @@ function gui.bind(deps)
   update_combinators_for_surface = deps.update_combinators_for_surface
 end
 
-local function localised_strategy(strategy)
-  return { "alc.strategy-" .. strategy:gsub("_", "-") }
+local function localised_category_word(category_key)
+  return { "alc.strategy-category-word-" .. category_key }
+end
+
+local function localised_strategy(strategy, category_key)
+  return { "alc.strategy-" .. strategy:gsub("_", "-"), localised_category_word(category_key) }
 end
 
 local function localised_item_name(name)
@@ -112,7 +116,7 @@ local function populate_priority_table(items_table, v, category_key)
       items_table.add{
         type = "button",
         caption = STRATEGY_BUTTON_CAPTION[entry.strategy] or "?",
-        tooltip = { "alc.strategy-tooltip", localised_strategy(entry.strategy) },
+        tooltip = { "alc.strategy-tooltip", localised_category_word(category_key), localised_strategy(entry.strategy, category_key) },
         tags = { alc_action = "strategy_cycle", category = category_key, item = name },
         style = "tool_button",
       }
