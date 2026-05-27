@@ -498,6 +498,80 @@ local function clear_surface(surface_index)
   remove_surface_from_list(surface_index)
 end
 
+-- Locomotives/vehicles can have multi-slot fuel inventories. We only manage
+-- slot 1 so a mix of priority entries can't spread different fuels across
+-- the remaining slots — players keep manual control of slots 2+.
+local function fill_fuel_first_slot(fuel_inv, entries, count, taken)
+  if #fuel_inv == 0 then return end
+  local slot = fuel_inv[1]
+
+  if slot.valid_for_read then
+    local name = slot.name
+    local quality = slot.quality and slot.quality.name or "normal"
+
+    local entry
+    for i = 1, count do
+      if entries[i].name == name then
+        entry = entries[i]
+        break
+      end
+    end
+    if not entry then return end
+
+    local total = entry.totals[quality] or 0
+    if total == 0 then return end
+
+    local taken_for_name = taken[name]
+    local already = (taken_for_name and taken_for_name[quality]) or 0
+    local available = total - already
+    if available <= 0 then return end
+
+    local stack_size = prototypes.item[name].stack_size
+    local cap = max_fill < stack_size and max_fill or stack_size
+    local room = cap - slot.count
+    if room <= 0 then return end
+
+    local to_insert = available < room and available or room
+    slot.count = slot.count + to_insert
+    if not taken_for_name then
+      taken_for_name = {}
+      taken[name] = taken_for_name
+    end
+    taken_for_name[quality] = already + to_insert
+    return
+  end
+
+  for i = 1, count do
+    local entry = entries[i]
+    local name = entry.name
+    local totals = entry.totals
+    local q_order = entry.q_order
+    local taken_for_name = taken[name]
+
+    for j = 1, #q_order do
+      local quality = q_order[j]
+      local total = totals[quality] or 0
+      if total > 0 then
+        local already = (taken_for_name and taken_for_name[quality]) or 0
+        local available = total - already
+        if available > 0 then
+          local stack_size = prototypes.item[name].stack_size
+          local cap = max_fill < stack_size and max_fill or stack_size
+          local to_insert = available < cap and available or cap
+          if slot.set_stack{name = name, count = to_insert, quality = quality} then
+            if not taken_for_name then
+              taken_for_name = {}
+              taken[name] = taken_for_name
+            end
+            taken_for_name[quality] = already + to_insert
+            return
+          end
+        end
+      end
+    end
+  end
+end
+
 local function fill_one_inventory(consumer_inv, entries, count, taken)
   if consumer_inv.is_full() then return end
 
@@ -553,7 +627,7 @@ fill_consumer = function(consumer, ctx)
   if consumer.has_fuel and ctx.fuel_count > 0 then
     local fuel_inv = entity.get_fuel_inventory()
     if fuel_inv then
-      fill_one_inventory(fuel_inv, ctx.fuel_entries, ctx.fuel_count, ctx.taken)
+      fill_fuel_first_slot(fuel_inv, ctx.fuel_entries, ctx.fuel_count, ctx.taken)
     end
   end
   if consumer.ammo_idx and ctx.ammo_count > 0 then
