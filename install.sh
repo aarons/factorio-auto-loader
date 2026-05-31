@@ -26,7 +26,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 mkdir -p "$STAGE/$SLUG"
-cp -R control.lua gui.lua data.lua settings.lua info.json locale "$STAGE/$SLUG/"
+cp -R control.lua data.lua settings.lua info.json locale "$STAGE/$SLUG/"
 
 (cd "$STAGE" && zip -qr "$SCRIPT_DIR/$ZIP" "$SLUG")
 
