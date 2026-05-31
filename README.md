@@ -1,4 +1,4 @@
-# AmmoLoader+=1
+# Auto-Loader
 
 A small Factorio Space Age (2.0) mod that adds an **Auto-Loader Chest**.
 Drop ammo or fuel into one and it tops up nearby compatible entities on the

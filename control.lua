@@ -4,10 +4,11 @@ local current_nth_tick
 local max_fill
 local default_fuel_strategy
 local default_ammo_strategy
-local fill_consumer              -- forward decl: try_register_consumer instant-fills via this
-local build_filters_for_surface  -- forward decl: register_chest seeds new CCs via this
-local update_combinators_for_surface -- forward decl: called from on_step / take_stack
+local fill_consumer
+local build_filters_for_surface
+local update_combinators_for_surface
 
+-- Maps consumer entity type to its ammo inventory id.
 local AMMO_INVENTORY = {
   ["ammo-turret"]      = defines.inventory.turret_ammo,
   ["car"]              = defines.inventory.car_ammo,
@@ -20,742 +21,135 @@ local AMMO_INVENTORY = {
 local CHEST_NAME = "auto-loader-chest-linked"
 local CC_NAME    = "auto-loader-chest-cc"
 
--- Circuit-network signals are int32. Counts in virtual storage are Lua
--- numbers and could in theory exceed that range; clamp before assigning
--- to a logistic filter so we never overflow.
+-- Max circuit-network signal value; counts are clamped to it.
 local INT32_MAX = 2147483647
 
--- Item-kind sets, populated from prototypes once at startup and refreshed
--- on_configuration_changed. Mutated in place so closures over them stay valid.
+-- Item-name sets populated from prototypes.
 local FUEL_ITEMS = {}
 local AMMO_ITEMS = {}
 
--- Quality orderings — module-level, mutated in place. ASC: normal → legendary,
--- DESC: legendary → normal. Used by the highest/lowest-quality-first strategies
--- without per-fill allocation.
+-- Quality names ordered normal→legendary (ASC) and legendary→normal (DESC).
 local QUALITY_ASC = {}
 local QUALITY_DESC = {}
 
+-- Populate FUEL_ITEMS and AMMO_ITEMS from item prototypes.
 local function rebuild_item_kind_sets()
-  for k in pairs(FUEL_ITEMS) do FUEL_ITEMS[k] = nil end
-  for k in pairs(AMMO_ITEMS) do AMMO_ITEMS[k] = nil end
-  for name, proto in pairs(prototypes.item) do
-    if proto.type == "ammo" then
-      AMMO_ITEMS[name] = true
-    elseif proto.fuel_category then
-      FUEL_ITEMS[name] = true
-    end
-  end
 end
 
+-- Build the ascending/descending quality-name orderings.
 local function rebuild_quality_orders()
-  for k in pairs(QUALITY_ASC)  do QUALITY_ASC[k]  = nil end
-  for k in pairs(QUALITY_DESC) do QUALITY_DESC[k] = nil end
-  local list = {}
-  for name, proto in pairs(prototypes.quality) do
-    list[#list + 1] = { name = name, level = proto.level }
-  end
-  table.sort(list, function(a, b) return a.level < b.level end)
-  local n = #list
-  for i = 1, n do
-    QUALITY_ASC[i] = list[i].name
-    QUALITY_DESC[i] = list[n - i + 1].name
-  end
 end
 
--- All chests on the same surface share one logical inventory via
--- LuaEntity.link_id. We hash a per-surface id off the surface NAME (stable
--- across save/load — surface indices aren't) so reloads don't relink chests
--- into a different pool. Prefix is mod-scoped so we don't collide with any
--- other linked-container the player may have placed.
+-- Return a stable link_id for a surface's shared chest pool.
 local function link_id_for_surface(surface)
-  local s = "raleys-ammo-loader-" .. surface.name
-  local hash = 0x811c9dc5
-  for i = 1, #s do
-    hash = bit32.bxor(hash, string.byte(s, i))
-    hash = bit32.band(hash * 0x01000193, 0xffffffff)
-  end
-  return hash
 end
 
+-- Initialize all storage tables.
 local function reset_storage()
-  storage.chests_by_surface         = {}
-  storage.shared_chest              = {}
-  storage.chest_surface             = {}
-  storage.consumer_queue            = {}
-  storage.consumer_cursor           = {}
-  storage.consumers                 = {}
-  storage.surface_list              = {}
-  storage.surface_list_cursor       = 1
-  -- virtual[surface_index] = {
-  --   fuel = { [item_name] = { strategy, totals = {[quality] = count} } },
-  --   ammo = { same shape },
-  --   fuel_order = { item_name, ... },  -- priority order, position 1 = highest
-  --   ammo_order = { item_name, ... },
-  -- }
-  storage.virtual                   = {}
-  -- last_sweep_tick[surface_index] = game.tick of last on_step sweep; throttle key
-  storage.last_sweep_tick           = {}
-  -- cc_by_chest[chest_unit_number] = paired hidden constant-combinator entity.
-  -- Keyed by chest unit_number so destroy events resolve in O(1) without a
-  -- separate cc-unit-number → chest map.
-  storage.cc_by_chest               = {}
-  -- alc_open_chest[player_index] = surface_index of the chest the player has open
-  storage.alc_open_chest            = {}
-  -- alc_open_tab[player_index] = "fuel" | "ammo" — last-selected priority tab
-  storage.alc_open_tab              = {}
 end
 
+-- Get or create the virtual storage table for a surface.
 local function init_surface_virtual(surface_index)
-  local v = storage.virtual[surface_index]
-  if not v then
-    v = { fuel = {}, ammo = {}, fuel_order = {}, ammo_order = {} }
-    storage.virtual[surface_index] = v
-  end
-  return v
 end
 
--- surface_list is the round-robin axis for on_step: each step resumes at
--- surface_list_cursor and processes up to batch_size consumer-fills total
--- across surfaces, advancing the cursor only after a surface's per-surface
--- queue has been fully cycled this step.
+-- Add a surface to the round-robin processing list.
 local function add_surface_to_list(surface_index)
-  local list = storage.surface_list
-  for i = 1, #list do
-    if list[i] == surface_index then return end
-  end
-  list[#list + 1] = surface_index
 end
 
+-- Remove a surface from the round-robin processing list.
 local function remove_surface_from_list(surface_index)
-  local list = storage.surface_list
-  local n = #list
-  for i = 1, n do
-    if list[i] == surface_index then
-      list[i] = list[n]
-      list[n] = nil
-      if storage.surface_list_cursor > n - 1 then
-        storage.surface_list_cursor = 1
-      end
-      return
-    end
-  end
 end
 
+-- Initialize all per-surface storage tables.
 local function init_surface(surface_index)
-  if not storage.chests_by_surface[surface_index] then
-    storage.chests_by_surface[surface_index] = {}
-  end
-  if not storage.consumer_queue[surface_index] then
-    storage.consumer_queue[surface_index] = {}
-  end
-  if not storage.consumer_cursor[surface_index] then
-    storage.consumer_cursor[surface_index] = 1
-  end
-  init_surface_virtual(surface_index)
-  add_surface_to_list(surface_index)
 end
 
+-- Register a placed loader chest and create its paired combinator.
 local function register_chest(entity)
-  local unit_number = entity.unit_number
-  if not unit_number then return end
-  -- Set link_id every time so a chest that arrives with a stale or default
-  -- (0) value — clone, blueprint paste, third-party script — gets joined to
-  -- the surface's pool before any inserter can touch it.
-  entity.link_id = link_id_for_surface(entity.surface)
-  local surface_index = entity.surface.index
-  init_surface(surface_index)
-  local chests = storage.chests_by_surface[surface_index]
-  if chests[unit_number] then return end
-  chests[unit_number] = entity
-  storage.chest_surface[unit_number] = surface_index
-  if not storage.shared_chest[surface_index] then
-    storage.shared_chest[surface_index] = entity
-  end
-  script.register_on_object_destroyed(entity)
-
-  -- Spawn the paired hidden constant-combinator and script-wire it to the
-  -- chest's circuit ports. Player-attached red/green wires read the CC's
-  -- output as if produced by the chest itself. The connection is invisible
-  -- and not player-undoable because we mark it wire_origin.script.
-  local surface = entity.surface
-  local cc = surface.create_entity{
-    name      = CC_NAME,
-    position  = entity.position,
-    force     = entity.force,
-    create_build_effect_smoke = false,
-    raise_built = false,
-  }
-  if cc then
-    cc.destructible = false
-    cc.operable     = false
-    -- LuaWireConnector methods bind self via __index, so calling with `:`
-    -- double-passes self and the engine misreports the args as type errors.
-    -- Use dot syntax. reach_check=false because chest and CC are at the
-    -- exact same position so the default reach test would fail.
-    -- defines.wire_origin.script keeps the wire invisible and not
-    -- player-undoable.
-    local chest_red   = entity.get_wire_connector(defines.wire_connector_id.circuit_red,   true)
-    local chest_green = entity.get_wire_connector(defines.wire_connector_id.circuit_green, true)
-    local cc_red      = cc.get_wire_connector(defines.wire_connector_id.circuit_red,       true)
-    local cc_green    = cc.get_wire_connector(defines.wire_connector_id.circuit_green,     true)
-    cc_red.connect_to(chest_red,     false, defines.wire_origin.script)
-    cc_green.connect_to(chest_green, false, defines.wire_origin.script)
-    -- A freshly-created constant-combinator already has section 1; calling
-    -- add_section() returns nil and triggers "bad self" downstream.
-    -- enabled=true so the CC actually emits signals once filters are written.
-    local behaviour = cc.get_or_create_control_behavior()
-    behaviour.enabled = true
-    local section = behaviour.get_section(1)
-    if section then section.filters = build_filters_for_surface(surface_index) end
-    storage.cc_by_chest[unit_number] = cc
-  end
 end
 
--- All chests on a surface share one linked-container inventory, so any valid
--- one will do. We cache a single entity for an O(1) hot path; if it's gone
--- (destroy event missed, mod meddling) we rescan the map and re-cache.
+-- Return the shared linked-container inventory for a surface.
 local function get_shared_inventory(surface_index)
-  local cached = storage.shared_chest[surface_index]
-  if cached and cached.valid then
-    return cached.get_inventory(defines.inventory.chest)
-  end
-  local chests = storage.chests_by_surface[surface_index]
-  if not chests then return nil end
-  for unit_number, entity in pairs(chests) do
-    if entity.valid then
-      storage.shared_chest[surface_index] = entity
-      return entity.get_inventory(defines.inventory.chest)
-    else
-      chests[unit_number] = nil
-    end
-  end
-  storage.shared_chest[surface_index] = nil
-  return nil
 end
 
--- Drain occupied slots into virtual storage. The chest is the inserter target
--- and visible briefly to players, but items live as pure counts in virtual
--- storage once swept. Slot iteration preserves the order in which items first
--- arrive — that order seeds the priority list for newly-encountered items
--- (and also seeds priority on first sweep after upgrade from the old
--- slot-based model, where the player's slot 1 was already their priority 1).
+-- Move chest contents into virtual storage.
 local function sweep_into_virtual(shared_inv, surface_index)
-  if shared_inv.is_empty() then return end
-  local v = init_surface_virtual(surface_index)
-  local size = #shared_inv
-  for i = 1, size do
-    local stack = shared_inv[i]
-    if stack.valid_for_read then
-      local name = stack.name
-      local category, order, default_strat
-      if AMMO_ITEMS[name] then
-        category = v.ammo
-        order = v.ammo_order
-        default_strat = default_ammo_strategy
-      elseif FUEL_ITEMS[name] then
-        category = v.fuel
-        order = v.fuel_order
-        default_strat = default_fuel_strategy
-      end
-      if category then
-        local entry = category[name]
-        if not entry then
-          entry = { strategy = default_strat, totals = {} }
-          category[name] = entry
-          order[#order + 1] = name
-        end
-        local quality = stack.quality.name
-        entry.totals[quality] = (entry.totals[quality] or 0) + stack.count
-        stack.count = 0
-      end
-    end
-  end
 end
 
--- Build a quality iteration order for one priority entry, given its strategy.
--- For quality-level strategies the cached module list is reused. For
--- count-based strategies we sort the entry's non-zero qualities by snapshot
--- count; the snapshot is stable for the duration of the step so all consumers
--- see the same order (deferred-commit invariant).
+-- Return the quality iteration order for an entry's strategy.
 local function quality_order_for(entry)
-  local strategy = entry.strategy
-  if strategy == "highest_quality_first" then return QUALITY_DESC end
-  if strategy == "lowest_quality_first"  then return QUALITY_ASC  end
-  local totals = entry.totals
-  local list = {}
-  for q, c in pairs(totals) do
-    if c > 0 then list[#list + 1] = q end
-  end
-  if strategy == "lowest_count_first" then
-    table.sort(list, function(a, b) return totals[a] < totals[b] end)
-  else
-    table.sort(list, function(a, b) return totals[a] > totals[b] end)
-  end
-  return list
 end
 
+-- Build the priority-ordered entry list for a category.
 local function build_entries_for(category, order)
-  local out, n = {}, 0
-  for i = 1, #order do
-    local name = order[i]
-    local entry = category[name]
-    if entry then
-      n = n + 1
-      out[n] = { name = name, totals = entry.totals, q_order = quality_order_for(entry) }
-    end
-  end
-  return out, n
 end
 
--- Per-step plan for one surface. Iterates the priority list (not slots) and
--- precomputes a quality-iteration order per entry. Consumers pull via
--- ctx.taken[name][quality]; ctx.totals[name][quality] is the live virtual
--- count at step start. commit_step decrements virtual totals once at the end.
+-- Build the per-step fill plan for a surface.
 local function build_step_context(surface_index)
-  local v = storage.virtual[surface_index]
-  if not v then return nil end
-  local fuel_entries, fuel_count = build_entries_for(v.fuel, v.fuel_order)
-  local ammo_entries, ammo_count = build_entries_for(v.ammo, v.ammo_order)
-  return {
-    fuel_entries = fuel_entries, fuel_count = fuel_count,
-    ammo_entries = ammo_entries, ammo_count = ammo_count,
-    taken = {},
-  }
 end
 
+-- Apply taken amounts back to virtual storage.
 local function commit_step(ctx, surface_index)
-  local v = storage.virtual[surface_index]
-  if not v then return end
-  for name, by_q in pairs(ctx.taken) do
-    local entry = v.fuel[name] or v.ammo[name]
-    if entry then
-      local totals = entry.totals
-      for quality, t in pairs(by_q) do
-        local cur = totals[quality] or 0
-        if t >= cur then
-          totals[quality] = nil
-        else
-          totals[quality] = cur - t
-        end
-      end
-    end
-  end
 end
 
--- Build a logistic-section filter list reflecting virtual storage on this
--- surface — one filter per (item × quality) with a non-zero count. Per-surface
--- (not per-chest) because all chests on a surface share one virtual store, so
--- the same table can be assigned to every chest's combinator. No de-dup
--- needed: sweep_into_virtual classifies each item name as exactly one of
--- fuel/ammo (the if/elseif against AMMO_ITEMS / FUEL_ITEMS).
+-- Build circuit-signal filters from a surface's virtual storage.
 build_filters_for_surface = function(surface_index)
-  local v = storage.virtual[surface_index]
-  if not v then return {} end
-  local out, k = {}, 0
-  for _, category in ipairs({ v.fuel, v.ammo }) do
-    for name, entry in pairs(category) do
-      for quality, count in pairs(entry.totals) do
-        if count > 0 then
-          k = k + 1
-          out[k] = {
-            value = { type = "item", name = name, quality = quality, comparator = "=" },
-            min   = (count > INT32_MAX) and INT32_MAX or count,
-          }
-        end
-      end
-    end
-  end
-  return out
 end
 
--- Update every chest's paired combinator on this surface. Called only at
--- mutation points for storage.virtual[surface_index]; idle surfaces incur
--- zero work.
+-- Push virtual storage to every chest's combinator on a surface.
 update_combinators_for_surface = function(surface_index)
-  local chests = storage.chests_by_surface[surface_index]
-  if not chests then return end
-  local filters = build_filters_for_surface(surface_index)
-  for unit_number in pairs(chests) do
-    local cc = storage.cc_by_chest[unit_number]
-    if cc and cc.valid then
-      local section = cc.get_or_create_control_behavior().get_section(1)
-      if section then section.filters = filters end
-    end
-  end
 end
 
+-- Register a fuel/ammo consumer and instant-fill it.
 local function try_register_consumer(entity)
-  local unit_number = entity.unit_number
-  if not unit_number then return end
-  if storage.consumers[unit_number] then return end
-
-  local has_fuel = entity.get_fuel_inventory() ~= nil
-  local ammo_idx = AMMO_INVENTORY[entity.type]
-  if ammo_idx then
-    local ammo_inv = entity.get_inventory(ammo_idx)
-    if not (ammo_inv and #ammo_inv > 0) then ammo_idx = nil end
-  end
-  if not (has_fuel or ammo_idx) then return end
-
-  local surface_index = entity.surface.index
-  init_surface(surface_index)
-
-  -- Same consumer record is shared between the queue (round-robin
-  -- iteration) and storage.consumers[unit_number] (O(1) dedup at
-  -- registration plus lookup in the destroy handler). Caching ammo_idx
-  -- and has_fuel here keeps the fill path off the
-  -- AMMO_INVENTORY[entity.type] / get_fuel_inventory() boundary calls.
-  local consumer = {
-    entity        = entity,
-    unit_number   = unit_number,
-    surface_index = surface_index,
-    has_fuel      = has_fuel,
-    ammo_idx      = ammo_idx,
-  }
-
-  local queue = storage.consumer_queue[surface_index]
-  queue[#queue + 1] = consumer
-  storage.consumers[unit_number] = consumer
-  script.register_on_object_destroyed(entity)
-
-  -- Instant-fill at placement so a freshly-built turret doesn't sit empty
-  -- while waiting for the cursor to come around. Operates against whatever
-  -- virtual state on_step has already accumulated.
-  local ctx = build_step_context(surface_index)
-  if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
-    fill_consumer(consumer, ctx)
-    commit_step(ctx, surface_index)
-    update_combinators_for_surface(surface_index)
-  end
 end
 
+-- Handle destruction of a tracked chest or consumer.
 local function on_object_destroyed(event)
-  -- We only ever register entities, so useful_id is the unit_number. The
-  -- queue slot for a destroyed consumer is left for the fill loop to
-  -- swap-pop on next visit; rewriting the array here would be O(n).
-  local unit_number = event.useful_id
-  local consumer = storage.consumers[unit_number]
-  if consumer then
-    storage.consumers[unit_number] = nil
-    return
-  end
-
-  local surface_index = storage.chest_surface[unit_number]
-  if surface_index then
-    storage.chest_surface[unit_number] = nil
-    local chests = storage.chests_by_surface[surface_index]
-    if chests then chests[unit_number] = nil end
-    local cached = storage.shared_chest[surface_index]
-    if cached and (not cached.valid or cached.unit_number == unit_number) then
-      storage.shared_chest[surface_index] = nil
-    end
-    local cc = storage.cc_by_chest[unit_number]
-    if cc and cc.valid then cc.destroy() end
-    storage.cc_by_chest[unit_number] = nil
-  end
 end
 
+-- Route a built entity to chest or consumer registration.
 local function handle_built_entity(entity)
-  if not (entity and entity.valid) then return end
-  if entity.name == CHEST_NAME then
-    register_chest(entity)
-  else
-    try_register_consumer(entity)
-  end
 end
 
+-- Build-event handler.
 local function on_built(event)
-  handle_built_entity(event.entity or event.created_entity)
 end
 
+-- Clone-event handler.
 local function on_cloned(event)
-  handle_built_entity(event.destination)
 end
 
+-- Tear down all storage for a surface.
 local function clear_surface(surface_index)
-  local queue = storage.consumer_queue[surface_index]
-  if queue then
-    for i = 1, #queue do
-      local consumer = queue[i]
-      if consumer then storage.consumers[consumer.unit_number] = nil end
-    end
-  end
-  local chests = storage.chests_by_surface[surface_index]
-  if chests then
-    for unit_number in pairs(chests) do
-      storage.chest_surface[unit_number] = nil
-      local cc = storage.cc_by_chest[unit_number]
-      if cc and cc.valid then cc.destroy() end
-      storage.cc_by_chest[unit_number] = nil
-    end
-  end
-  storage.chests_by_surface[surface_index]         = nil
-  storage.shared_chest[surface_index]              = nil
-  storage.consumer_queue[surface_index]            = nil
-  storage.consumer_cursor[surface_index]           = nil
-  storage.virtual[surface_index]                   = nil
-  remove_surface_from_list(surface_index)
 end
 
--- Locomotives/vehicles can have multi-slot fuel inventories. We only manage
--- slot 1 so a mix of priority entries can't spread different fuels across
--- the remaining slots — players keep manual control of slots 2+.
+-- Fill the first fuel slot of a consumer.
 local function fill_fuel_first_slot(fuel_inv, entries, count, taken)
-  if #fuel_inv == 0 then return end
-  local slot = fuel_inv[1]
-
-  if slot.valid_for_read then
-    local name = slot.name
-    local quality = slot.quality and slot.quality.name or "normal"
-
-    local entry
-    for i = 1, count do
-      if entries[i].name == name then
-        entry = entries[i]
-        break
-      end
-    end
-    if not entry then return end
-
-    local total = entry.totals[quality] or 0
-    if total == 0 then return end
-
-    local taken_for_name = taken[name]
-    local already = (taken_for_name and taken_for_name[quality]) or 0
-    local available = total - already
-    if available <= 0 then return end
-
-    local stack_size = prototypes.item[name].stack_size
-    local cap = max_fill < stack_size and max_fill or stack_size
-    local room = cap - slot.count
-    if room <= 0 then return end
-
-    local to_insert = available < room and available or room
-    slot.count = slot.count + to_insert
-    if not taken_for_name then
-      taken_for_name = {}
-      taken[name] = taken_for_name
-    end
-    taken_for_name[quality] = already + to_insert
-    return
-  end
-
-  for i = 1, count do
-    local entry = entries[i]
-    local name = entry.name
-    local totals = entry.totals
-    local q_order = entry.q_order
-    local taken_for_name = taken[name]
-
-    for j = 1, #q_order do
-      local quality = q_order[j]
-      local total = totals[quality] or 0
-      if total > 0 then
-        local already = (taken_for_name and taken_for_name[quality]) or 0
-        local available = total - already
-        if available > 0 then
-          local stack_size = prototypes.item[name].stack_size
-          local cap = max_fill < stack_size and max_fill or stack_size
-          local to_insert = available < cap and available or cap
-          if slot.set_stack{name = name, count = to_insert, quality = quality} then
-            if not taken_for_name then
-              taken_for_name = {}
-              taken[name] = taken_for_name
-            end
-            taken_for_name[quality] = already + to_insert
-            return
-          end
-        end
-      end
-    end
-  end
 end
 
+-- Fill a consumer inventory from the priority entries.
 local function fill_one_inventory(consumer_inv, entries, count, taken)
-  if consumer_inv.is_full() then return end
-
-  -- Aggregate the consumer's current contents in one boundary crossing
-  -- instead of a per-slot get_item_count{...} below.
-  local current = {}
-  for _, e in ipairs(consumer_inv.get_contents()) do
-    current[e.name .. "|" .. (e.quality or "normal")] = e.count
-  end
-
-  -- Priority-list iteration: entries[1] is highest priority. Within an
-  -- entry, qualities are visited in q_order (per the entry's strategy).
-  for i = 1, count do
-    local entry = entries[i]
-    local name = entry.name
-    local totals = entry.totals
-    local q_order = entry.q_order
-    local taken_for_name = taken[name]
-
-    for j = 1, #q_order do
-      local quality = q_order[j]
-      local total = totals[quality] or 0
-      if total > 0 then
-        local already = (taken_for_name and taken_for_name[quality]) or 0
-        local available = total - already
-        if available > 0 then
-          local key = name .. "|" .. quality
-          local have = current[key] or 0
-          local want = max_fill - have
-          if want > 0 then
-            local to_insert = available < want and available or want
-            local inserted = consumer_inv.insert{
-              name = name, count = to_insert, quality = quality,
-            }
-            if inserted > 0 then
-              if not taken_for_name then
-                taken_for_name = {}
-                taken[name] = taken_for_name
-              end
-              taken_for_name[quality] = already + inserted
-              current[key] = have + inserted
-              if consumer_inv.is_full() then return end
-            end
-          end
-        end
-      end
-    end
-  end
 end
 
+-- Fill a consumer's fuel and ammo inventories.
 fill_consumer = function(consumer, ctx)
-  local entity = consumer.entity
-  if consumer.has_fuel and ctx.fuel_count > 0 then
-    local fuel_inv = entity.get_fuel_inventory()
-    if fuel_inv then
-      fill_fuel_first_slot(fuel_inv, ctx.fuel_entries, ctx.fuel_count, ctx.taken)
-    end
-  end
-  if consumer.ammo_idx and ctx.ammo_count > 0 then
-    local ammo_inv = entity.get_inventory(consumer.ammo_idx)
-    if ammo_inv then
-      fill_one_inventory(ammo_inv, ctx.ammo_entries, ctx.ammo_count, ctx.taken)
-    end
-  end
 end
 
+-- Round-robin tick handler that fills consumers across surfaces.
 local function on_step()
-  local surface_list = storage.surface_list
-  local n_surfaces = #surface_list
-  if n_surfaces == 0 then return end
-
-  local surface_list_cursor = storage.surface_list_cursor
-  if surface_list_cursor < 1 or surface_list_cursor > n_surfaces then surface_list_cursor = 1 end
-
-  local consumers = storage.consumers
-  local processed = 0
-  local surfaces_visited = 0
-
-  -- Global round-robin: each step processes up to batch_size consumer-fills
-  -- in total, advancing through surface_list. We finish a surface's queue
-  -- cycle (or run out of budget) before advancing surface_list_cursor, so a
-  -- surface's per-surface cursor is preserved across steps. The
-  -- surfaces_visited cap stops us looping forever if every surface is empty
-  -- or has nothing to give.
-  while processed < batch_size and surfaces_visited < n_surfaces do
-    local surface_index = surface_list[surface_list_cursor]
-    local queue = storage.consumer_queue[surface_index]
-    local n = queue and #queue or 0
-    local advance_surface = true
-
-    if n > 0 then
-      -- Sweep at most once per 60 ticks per surface. Items dropped in by
-      -- inserters can sit in the chest for up to ~1s before redistribution;
-      -- the linked-container is shown to players directly so they see
-      -- in-flight stock there rather than only in the priority GUI.
-      local last = storage.last_sweep_tick[surface_index]
-      if not last or game.tick - last >= 60 then
-        local shared_inv = get_shared_inventory(surface_index)
-        if shared_inv then sweep_into_virtual(shared_inv, surface_index) end
-        storage.last_sweep_tick[surface_index] = game.tick
-      end
-
-      local ctx = build_step_context(surface_index)
-      if ctx and (ctx.fuel_count > 0 or ctx.ammo_count > 0) then
-        local cursor = storage.consumer_cursor[surface_index] or 1
-        if cursor > n then cursor = 1 end
-        local cycle_complete = false
-
-        while processed < batch_size and n > 0 do
-          local consumer = queue[cursor]
-          if consumer and consumer.entity.valid then
-            fill_consumer(consumer, ctx)
-            processed = processed + 1
-            cursor = cursor + 1
-          else
-            -- Orphan: swap-pop with the last live entry. Cursor stays
-            -- put so the next iteration picks up the entry we just
-            -- swapped in. Belt-and-suspenders consumers[unit_number] = nil
-            -- covers a missed destroy event (replays, mod meddling).
-            if consumer and consumers[consumer.unit_number] == consumer then
-              consumers[consumer.unit_number] = nil
-            end
-            queue[cursor] = queue[n]
-            queue[n] = nil
-            n = n - 1
-          end
-
-          if cursor > n then
-            cursor = 1
-            cycle_complete = true
-            break
-          end
-        end
-
-        storage.consumer_cursor[surface_index] = cursor
-        advance_surface = cycle_complete or n == 0
-        commit_step(ctx, surface_index)
-        -- Virtual storage just changed (sweep added items, fills decremented
-        -- totals, or both). Push the new state to circuit signals before
-        -- moving to the next surface. Idle surfaces never get here.
-        update_combinators_for_surface(surface_index)
-      end
-    end
-
-    if advance_surface then
-      surface_list_cursor = surface_list_cursor + 1
-      if surface_list_cursor > n_surfaces then surface_list_cursor = 1 end
-      surfaces_visited = surfaces_visited + 1
-    else
-      break
-    end
-  end
-
-  storage.surface_list_cursor = surface_list_cursor
 end
 
+-- Load runtime settings into module locals.
 local function refresh_settings()
-  batch_size              = settings.global["auto-loader-chest-batch-size"].value
-  tick_interval           = settings.global["auto-loader-chest-tick-interval"].value
-  max_fill                = settings.global["auto-loader-chest-max-fill"].value
-  default_fuel_strategy   = settings.global["auto-loader-chest-default-fuel-strategy"].value
-  default_ammo_strategy   = settings.global["auto-loader-chest-default-ammo-strategy"].value
 end
 
+-- (Re)register the on_step nth-tick handler.
 local function reapply_on_nth_tick()
-  if current_nth_tick == tick_interval then return end
-  if current_nth_tick then script.on_nth_tick(current_nth_tick, nil) end
-  script.on_nth_tick(tick_interval, on_step)
-  current_nth_tick = tick_interval
 end
 
+-- Register all existing chests and consumers on every surface.
 local function scan_all_surfaces()
-  for _, surface in pairs(game.surfaces) do
-    init_surface(surface.index)
-    -- Drop any orphan CCs from a prior version: reset_storage cleared
-    -- cc_by_chest, so the world has hidden combinators we no longer
-    -- track. Clean slate before register_chest recreates them.
-    for _, cc in pairs(surface.find_entities_filtered{ name = CC_NAME }) do
-      cc.destroy()
-    end
-    for _, entity in pairs(surface.find_entities()) do
-      handle_built_entity(entity)
-    end
-  end
 end
 
 local gui = require("gui")
@@ -770,41 +164,15 @@ gui.bind({
 -- ── Lifecycle ────────────────────────────────────────────────────────────
 
 script.on_init(function()
-  rebuild_item_kind_sets()
-  rebuild_quality_orders()
-  reset_storage()
-  refresh_settings()
-  scan_all_surfaces()
-  reapply_on_nth_tick()
 end)
 
 script.on_configuration_changed(function()
-  rebuild_item_kind_sets()
-  rebuild_quality_orders()
-  reset_storage()
-  refresh_settings()
-  scan_all_surfaces()
-  reapply_on_nth_tick()
 end)
 
 script.on_load(function()
-  rebuild_item_kind_sets()
-  rebuild_quality_orders()
-  refresh_settings()
-  reapply_on_nth_tick()
 end)
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
-  if event.setting_type ~= "runtime-global" then return end
-  local name = event.setting
-  if name == "auto-loader-chest-batch-size"
-     or name == "auto-loader-chest-tick-interval"
-     or name == "auto-loader-chest-max-fill"
-     or name == "auto-loader-chest-default-fuel-strategy"
-     or name == "auto-loader-chest-default-ammo-strategy" then
-    refresh_settings()
-    reapply_on_nth_tick()
-  end
 end)
 
 script.on_event(defines.events.on_built_entity,                on_built)
@@ -816,24 +184,17 @@ script.on_event(defines.events.on_entity_cloned,               on_cloned)
 
 script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
 
+-- Register the player's character as a consumer.
 local function on_player_character_event(event)
-  local player = game.get_player(event.player_index)
-  if player and player.character then
-    handle_built_entity(player.character)
-  end
 end
 script.on_event(defines.events.on_player_created,   on_player_character_event)
 script.on_event(defines.events.on_player_respawned, on_player_character_event)
 
 script.on_event(defines.events.on_surface_created, function(event)
-  init_surface(event.surface_index)
 end)
 script.on_event(defines.events.on_surface_deleted, function(event)
-  clear_surface(event.surface_index)
 end)
 script.on_event(defines.events.on_surface_cleared, function(event)
-  clear_surface(event.surface_index)
-  init_surface(event.surface_index)
 end)
 
 script.on_event(defines.events.on_gui_opened, gui.on_gui_opened)
