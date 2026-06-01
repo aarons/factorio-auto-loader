@@ -4,6 +4,47 @@ This mod adds an Auto-Loader chest that fills ammo and fuel in entities on the s
 
 This is inspired by ammo-loader; but updated to handle quality ammo and fuel, as well as improve UPS efficiency.
 
+## How it works
+
+**Supply (`data.lua` + `control.lua`).** The chest is a vanilla `linked-chest`
+derivative. On build we set its `link_id` to the surface index, so every
+Auto-Loader chest on a surface shares one pooled inventory (linked-container
+inventories are keyed by prototype name, force, and `link_id`). Stock fuel and
+ammo into any of them.
+
+**Fill engine (`control.lua`).** A registry of fillable entities (ammo turrets,
+artillery, vehicles, characters, and any burner) is built from the build/clone
+events plus an initial surface scan, with `register_on_object_destroyed` as the
+removal backstop. Each tick a bounded round-robin sweep processes K entities
+(the `auto-loader-entities-per-tick` runtime setting, default 10), advancing a
+persistent cursor so cost is constant regardless of how many entities exist. For
+each surface touched in a tick the pool is read once, decremented locally as
+inserts happen, and written back with a single `remove` at tick end.
+
+Fill rules: skip anything marked for deconstruction; never fill another force's
+entities; locomotives only get their first fuel slot; characters only get ammo
+for categories of a currently-equipped gun; ammo is capped at the turret's
+`automated_ammo_count` (default 10) so nothing drains the pool. Quality is
+respected — items are inserted at the quality the pool holds and only where the
+entity accepts them.
+
+### Why polling, not events
+
+There is **no event for ammo or fuel consumption**, and no inventory-changed
+event for non-player entities — ammo only drops when a turret fires, fuel only
+when a burner works, and neither raises anything. Alerts are poll-only and
+`LuaPlayer::get_alerts` returns nothing on a player-less dedicated server, so
+they are unusable as a trigger. Hence the self-maintained registry and bounded
+sweep.
+
+### Not yet built (future tiers)
+
+- **Status gating / deadline scheduling for fuel** — skip burners that can't be
+  empty yet (compute ticks-until-dry from fuel value and burn rate) so they fall
+  off the sweep until they need attention.
+- **Combat-aware turret topping** (driven by `on_entity_damaged`) — proactively
+  refill turrets that are actually firing instead of waiting for the sweep.
+
 ## Dev Notes on Events
 
 This is a list of all events, we are looking for ones that could be used to inform us of an entity needing fuel or ammo. Any kind of activity around combat, or items created etc.
