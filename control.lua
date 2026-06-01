@@ -1,17 +1,14 @@
--- Auto-Loader: per-surface supply + the fill engine.
+-- Auto-Loader
 --
--- Supply half: every Auto-Loader chest pools into one inventory per surface. On
+-- Supply: every Auto-Loader chest is linked to one inventory per surface. On
 -- build we set link_id to the surface index, so all chests on a surface share a
 -- single linked-container inventory (keyed by prototype name, force, link_id).
 --
--- Fill half (this file's main job): distribute that pooled supply into turrets
--- (ammo) and burners (fuel) without iterating every entity every tick. We keep a
--- registry of fillable entities and sweep a bounded number of them per tick in a
--- round-robin cursor. For each surface we touch in a tick we read its pool once,
--- decrement a local tally as we insert, and write the total back with a single
--- remove at the end of the tick. There is no event for ammo/fuel consumption, so
--- polling our own registry is the only option (see README).
-
+-- Fill: distributes that pooled supply into turrets (ammo) and burners (fuel)
+-- We keep a registry of fillable entities and sweep a bounded number of them
+-- per tick in a round-robin cursor. For each surface we touch in a tick we read
+-- its supply pool once, decrement a local tally as we insert, and write the total
+-- back with a single remove at the end of the tick.
 local CHEST = "auto-loader-chest"
 local K_SETTING = "auto-loader-entities-per-tick"
 
@@ -19,10 +16,9 @@ local K_SETTING = "auto-loader-entities-per-tick"
 -- characters). Caps how much ammo we keep stocked so a single entity can't drain
 -- the whole pool; turrets use their own automated_ammo_count instead.
 local DEFAULT_AMMO_TARGET = 10
+local FUEL_TARGET = 10
 
--- Item-ammo inventories only. Deliberately excludes electric-turret (power) and
--- fluid-turret (fluid) — those have no item ammo to load. There is no universal
--- ammo-inventory constant, so map entity type -> define.
+-- Item-ammo inventories
 local AMMO_DEFINE = {
   ["ammo-turret"]      = defines.inventory.turret_ammo,
   ["artillery-turret"] = defines.inventory.artillery_turret_ammo,
@@ -317,14 +313,27 @@ local function fill_fuel(entry, entity, pool)
     return
   end
 
-  -- Other burners are single-slot; fill to full so the slow continuous burn has
-  -- a buffer and we revisit rarely.
+  -- Top up to FUEL_TARGET total fuel rather than a full stack, so a large
+  -- buildout can't drain the supply instantly (mirrors the ammo top-up).
+  local current = 0
+  for i = 1, #inv do
+    local s = inv[i]
+    if s.valid_for_read and ITEM_FUEL[s.name] then current = current + s.count end
+  end
+  local budget = FUEL_TARGET - current
+  if budget <= 0 then return end
+
   for _, f in ipairs(pool.fuels) do
+    if budget <= 0 then break end
     if cats[f.category] then
       local av = pool_avail(pool, f.name, f.quality)
       if av > 0 then
-        local inserted = inv.insert{ name = f.name, count = av, quality = f.quality }
-        if inserted > 0 then pool_charge(pool, f.name, f.quality, inserted) end
+        local want = budget < av and budget or av
+        local inserted = inv.insert{ name = f.name, count = want, quality = f.quality }
+        if inserted > 0 then
+          pool_charge(pool, f.name, f.quality, inserted)
+          budget = budget - inserted
+        end
       end
     end
   end
