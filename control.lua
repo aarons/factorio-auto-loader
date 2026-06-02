@@ -5,10 +5,9 @@
 -- single linked-container inventory (keyed by prototype name, force, link_id).
 --
 -- Fill: distributes that pooled supply into turrets (ammo) and burners (fuel)
--- We keep a registry of fillable entities and sweep a bounded number of them
--- per tick in a round-robin cursor. For each surface we touch in a tick we read
--- its supply pool once, decrement a local tally as we insert, and write the total
--- back with a single remove at the end of the tick.
+-- We keep a registry of fillable entities in an array (order) and sweep a
+-- bounded number per tick with a round-robin cursor. A dead entry is removed by
+-- swap-popping it
 local CHEST = "auto-loader-chest"
 local K_SETTING = "auto-loader-entities-per-tick"
 
@@ -131,8 +130,8 @@ local function on_built(event)
 end
 
 local function on_object_destroyed(event)
-  -- For entities useful_id is the unit_number. The order array keeps the stale
-  -- slot until the sweep compacts it.
+  -- For entities useful_id is the unit_number. The sweep swap-pops the stale
+  -- slot out of the order array when it next reaches it.
   local un = event.useful_id
   if un and storage.fillables then storage.fillables[un] = nil end
 end
@@ -356,21 +355,6 @@ end
 -- The bounded round-robin sweep.
 ----------------------------------------------------------------------
 
-local function compact_order()
-  local order = storage.order
-  local w = 0
-  for r = 1, #order do
-    local un = order[r]
-    if un ~= nil then
-      w = w + 1
-      order[w] = un
-    end
-  end
-  for r = #order, w + 1, -1 do order[r] = nil end
-  storage.nil_count = 0
-  if storage.cursor > w then storage.cursor = 1 end
-end
-
 local function on_tick()
   local order = storage.order
   if not order then return end
@@ -385,8 +369,9 @@ local function on_tick()
   local pools = {}
   local filled, steps = 0, 0
 
-  -- steps < n bounds the scan so a registry full of stale holes can't spin; the
-  -- cursor persists across ticks for fair round-robin.
+  -- steps < n bounds the scan; the cursor persists across ticks for fair
+  -- round-robin. n is the pre-sweep length, so swap-pops this tick may leave
+  -- nils in the tail slots [#order+1, n] which we simply skip.
   while filled < k and steps < n do
     steps = steps + 1
     if cursor > n then cursor = 1 end
@@ -399,9 +384,13 @@ local function on_tick()
         fill_entity(entry, pools)
         filled = filled + 1
       else
-        order[idx] = nil
+        -- Dead entry: swap the tail into this slot and pop. O(1), keeps the
+        -- array dense. We don't revisit idx this cycle (skipping one entity on
+        -- a removal is fine since the queue drains quickly).
+        local last = #order
+        order[idx] = order[last]
+        order[last] = nil
         fillables[un] = nil
-        storage.nil_count = storage.nil_count + 1
       end
     end
   end
@@ -417,8 +406,6 @@ local function on_tick()
       end
     end
   end
-
-  if storage.nil_count * 4 > n then compact_order() end
 end
 
 ----------------------------------------------------------------------
@@ -430,7 +417,6 @@ local function initialize()
   storage.fillables = storage.fillables or {}
   storage.order = storage.order or {}
   storage.cursor = storage.cursor or 1
-  storage.nil_count = storage.nil_count or 0
   storage.reps = storage.reps or {}
 
   for _, surface in pairs(game.surfaces) do
