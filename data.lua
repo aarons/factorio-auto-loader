@@ -52,8 +52,9 @@ chest.icon_size = nil
 chest.picture = table.deepcopy(steel_chest.picture)
 tint_sprite(chest.picture, CHEST_TINT)
 
--- 20 slots, fuel/ammo stacks hold 10x for a compact pooled supply.
-chest.inventory_size = 20
+-- Slot count is player-configurable (startup setting); fuel/ammo stacks hold
+-- 10x for a compact pooled supply.
+chest.inventory_size = settings.startup["auto-loader-chest-slots"].value
 chest.inventory_type = "with_custom_stack_size"
 chest.inventory_properties = {
   stack_size_multiplier = 10,
@@ -61,13 +62,13 @@ chest.inventory_properties = {
 }
 
 -- Players stock the chest, but the per-surface link is managed at runtime and
--- must not be editable through the GUI.
+-- is not be editable through the GUI.
 chest.gui_mode = "none"
 
--- Placeable anywhere, including space platforms: no gravity/surface gate.
+-- Placeable anywhere, including space platforms.
 chest.surface_conditions = nil
 
--- Circuit readout of contents (inherited from linked-chest; set explicitly).
+-- Circuit readout of contents (not sure it's required, holdover from older version)
 chest.circuit_connector = table.deepcopy(steel_chest.circuit_connector)
 chest.circuit_wire_max_distance = steel_chest.circuit_wire_max_distance
 
