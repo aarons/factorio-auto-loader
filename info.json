@@ -1,7 +1,7 @@
 {
   "name": "auto-loader-chest",
-  "version": "3.4.0",
-  "factorio_version": "2.0",
+  "version": "3.5.0",
+  "factorio_version": "2.1",
   "title": "Auto-Loader",
   "author": "raley",
   "description": "Adds an chest that automatically refills ammo and fuel of turrets and fuel burners. Works with Space Age and Quality",
