@@ -6,7 +6,7 @@ data:extend({
     type = "string-setting",
     name = "auto-loader-chest-cost",
     setting_type = "startup",
-    default_value = "default",
+    default_value = "medium",
     allowed_values = { "easy", "medium", "hard", "extra-hard" },
     order = "a",
   },

@@ -106,7 +106,7 @@ local COST_INGREDIENTS = {
 }
 
 local cost = settings.startup["auto-loader-chest-cost"].value
-local ingredients = COST_INGREDIENTS[cost] or COST_INGREDIENTS["default"]
+local ingredients = COST_INGREDIENTS[cost] or COST_INGREDIENTS["medium"]
 
 local recipe = {
   type = "recipe",
