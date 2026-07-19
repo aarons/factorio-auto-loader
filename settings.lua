@@ -2,6 +2,15 @@
 
 data:extend({
   {
+    -- Recipe cost tier for the Auto-Loader chest.
+    type = "string-setting",
+    name = "auto-loader-chest-cost",
+    setting_type = "startup",
+    default_value = "default",
+    allowed_values = { "easy", "medium", "hard", "extra-hard" },
+    order = "a",
+  },
+  {
     -- Number of inventory slots on each Auto-Loader chest.
     type = "int-setting",
     name = "auto-loader-chest-slots",
@@ -9,15 +18,6 @@ data:extend({
     default_value = 48,
     minimum_value = 1,
     maximum_value = 1000,
-    order = "a",
-  },
-  {
-    -- Recipe cost tier for the Auto-Loader chest.
-    type = "string-setting",
-    name = "auto-loader-chest-cost",
-    setting_type = "startup",
-    default_value = "default",
-    allowed_values = { "inexpensive", "default", "expensive", "very-expensive" },
     order = "b",
   },
   {

@@ -85,19 +85,19 @@ local item = {
 -- Recipe cost tiers, selected by startup setting. Each tier past "default"
 -- adds the next circuit up the chain.
 local COST_INGREDIENTS = {
-  ["inexpensive"] = {
+  ["easy"] = {
     { type = "item", name = "iron-plate", amount = 1 },
   },
-  ["default"] = {
+  ["medium"] = {
     { type = "item", name = "steel-chest",        amount = 1 },
     { type = "item", name = "electronic-circuit", amount = 3 },
   },
-  ["expensive"] = {
+  ["hard"] = {
     { type = "item", name = "steel-chest",        amount = 1 },
     { type = "item", name = "electronic-circuit", amount = 3 },
     { type = "item", name = "advanced-circuit",   amount = 3 },
   },
-  ["very-expensive"] = {
+  ["extra-hard"] = {
     { type = "item", name = "steel-chest",        amount = 1 },
     { type = "item", name = "electronic-circuit", amount = 3 },
     { type = "item", name = "advanced-circuit",   amount = 3 },
