@@ -52,12 +52,12 @@ chest.icon_size = nil
 chest.picture = table.deepcopy(steel_chest.picture)
 tint_sprite(chest.picture, CHEST_TINT)
 
--- Slot count is player-configurable (startup setting); fuel/ammo stacks hold
--- 10x for a compact pooled supply.
+-- Slot count and stack compression are player-configurable (startup settings);
+-- multiplied stacks give a compact pooled supply.
 chest.inventory_size = settings.startup["auto-loader-chest-slots"].value
 chest.inventory_type = "with_custom_stack_size"
 chest.inventory_properties = {
-  stack_size_multiplier = 10,
+  stack_size_multiplier = settings.startup["auto-loader-chest-stack-multiplier"].value,
   with_bar = true,
 }
 
@@ -82,15 +82,38 @@ local item = {
   stack_size = 50,
 }
 
+-- Recipe cost tiers, selected by startup setting. Each tier past "default"
+-- adds the next circuit up the chain.
+local COST_INGREDIENTS = {
+  ["inexpensive"] = {
+    { type = "item", name = "iron-plate", amount = 1 },
+  },
+  ["default"] = {
+    { type = "item", name = "steel-chest",        amount = 1 },
+    { type = "item", name = "electronic-circuit", amount = 3 },
+  },
+  ["expensive"] = {
+    { type = "item", name = "steel-chest",        amount = 1 },
+    { type = "item", name = "electronic-circuit", amount = 3 },
+    { type = "item", name = "advanced-circuit",   amount = 3 },
+  },
+  ["very-expensive"] = {
+    { type = "item", name = "steel-chest",        amount = 1 },
+    { type = "item", name = "electronic-circuit", amount = 3 },
+    { type = "item", name = "advanced-circuit",   amount = 3 },
+    { type = "item", name = "processing-unit",    amount = 3 },
+  },
+}
+
+local cost = settings.startup["auto-loader-chest-cost"].value
+local ingredients = COST_INGREDIENTS[cost] or COST_INGREDIENTS["default"]
+
 local recipe = {
   type = "recipe",
   name = CHEST,
   enabled = true,
   energy_required = 0.5,
-  ingredients = {
-    { type = "item", name = "steel-chest",        amount = 1 },
-    { type = "item", name = "electronic-circuit", amount = 3 },
-  },
+  ingredients = table.deepcopy(ingredients),
   results = { { type = "item", name = CHEST, amount = 1 } },
 }
 

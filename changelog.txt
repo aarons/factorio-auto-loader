@@ -1,0 +1,6 @@
+---------------------------------------------------------------------------------------------------
+Version: 3.6.0
+Date: 2026-07-19
+  Features:
+    - Added a startup setting to choose the chest recipe cost: Inexpensive (1 iron plate), Default (steel chest + electronic circuits), Expensive (adds advanced circuits), or Very expensive (adds processing units).
+    - Added an inventory compression startup setting: the stack size multiplier for chest inventory slots (1-100000, default 10).
