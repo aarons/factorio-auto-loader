@@ -1,0 +1,161 @@
+---------------------------------------------------------------------------------------------------
+Version: 1.0.0
+Date: 2026-07-19
+  Info:
+    - First public release. The Auto-Loader chest pools one shared inventory per surface and automatically keeps turrets and burner-powered machines topped up with ammunition and fuel.
+    - The 0.x entries below are development history and were never publicly released. They are kept as a record of how the mod was designed.
+  Changes:
+    - Improved labeling, naming, and layout of settings
+    - The chest cost tiers are Easy, Medium, Hard, and Extra hard, defaulting to Medium: 1 steel chest and 3 electronic circuits.
+---------------------------------------------------------------------------------------------------
+Version: 0.16.0
+Date: 2026-07-19
+  Features:
+    - Added a startup setting to choose the chest recipe cost: Inexpensive (1 iron plate), Default (steel chest + electronic circuits), Expensive (adds advanced circuits), or Very expensive (adds processing units).
+    - Added an inventory compression startup setting: the stack size multiplier for chest inventory slots (1-100000, default 10).
+---------------------------------------------------------------------------------------------------
+Version: 0.15.1
+Date: 2026-07-03
+  Info:
+    - Updated for Factorio 2.1.
+---------------------------------------------------------------------------------------------------
+Version: 0.15.0
+Date: 2026-06-08
+  Features:
+    - Added a startup setting for the chest slot count (1-1000, default 48).
+  Changes:
+    - Raised the maximum for the entities-per-tick setting to 10000 for very large bases.
+---------------------------------------------------------------------------------------------------
+Version: 0.14.1
+Date: 2026-06-01
+  Optimizations:
+    - Simplified the fillable entity registry to use swap-and-pop removal, so the sweep no longer needs a separate compaction pass.
+---------------------------------------------------------------------------------------------------
+Version: 0.14.0
+Date: 2026-06-01
+  Features:
+    - Rebuilt automatic filling on top of the supply chest: a registry of fillable entities and a bounded round-robin sweep that pulls from the shared per-surface inventory into turrets and burners.
+    - Added the runtime setting "entities per tick" to control how much work the sweep does each tick.
+  Changes:
+    - Fuel is topped up to a fixed target instead of filling every consumer to the brim, so one locomotive can no longer drain the surface supply.
+---------------------------------------------------------------------------------------------------
+Version: 0.13.0
+Date: 2026-05-31
+  Major Features:
+    - Reset the mod to its supply foundation. The chest is now a plain linked container that pools one shared inventory per surface, keyed by surface index, and is craftable from the start with no technology gate.
+  Changes:
+    - The chest is now based on the vanilla linked chest.
+    - Removed the fill loop, the virtual storage ledger, the circuit signal combinator, the priority GUI, and all mod settings. These were rebuilt on a cleaner foundation in later releases.
+    - Existing saves keep the pooled supply chest but lose all automatic filling behavior and settings.
+---------------------------------------------------------------------------------------------------
+Version: 0.12.0
+Date: 2026-05-30
+  Changes:
+    - Renamed the mod from "AmmoLoader+=1" to "Auto-Loader". A migration rehashes each surface's shared pool so pooled contents are not orphaned by the rename.
+    - Fuel is now inserted only into the first slot of locomotive and vehicle fuel inventories, leaving the remaining slots for manual management.
+  Gui:
+    - Extracted the priority GUI into its own module.
+    - Switched the reorder buttons to standard Factorio arrow sprites.
+    - Strategy tooltips now name the item category they apply to.
+---------------------------------------------------------------------------------------------------
+Version: 0.11.0
+Date: 2026-05-01
+  Bugfixes:
+    - Fixed the hidden constant combinator failing to wire itself to the chest. Circuit output now works reliably.
+  Gui:
+    - Added "move to top" and "move to bottom" buttons to the priority list.
+---------------------------------------------------------------------------------------------------
+Version: 0.10.1
+Date: 2026-04-30
+  Optimizations:
+    - Circuit signals are now recomputed only when a surface's stored contents change, instead of rescanning every surface on a timer. Idle surfaces cost nothing.
+---------------------------------------------------------------------------------------------------
+Version: 0.10.0
+Date: 2026-04-30
+  Circuit Network:
+    - Auto-loader chests now emit one circuit signal per item and quality pair held in storage, for fuel and ammunition. Signals are shared across all chests on a surface and isolated between surfaces.
+---------------------------------------------------------------------------------------------------
+Version: 0.9.1
+Date: 2026-04-30
+  Bugfixes:
+    - The priority GUI no longer jumps back to the top when it refreshes.
+---------------------------------------------------------------------------------------------------
+Version: 0.9.0
+Date: 2026-04-30
+  Gui:
+    - Added tabs to switch between the fuel and ammunition priority lists, remembered per player.
+    - Replaced the strategy dropdowns with compact cycling buttons showing an indicator such as "Q down", with explanatory tooltips.
+    - Clicking an item slot now takes a stack of the highest available quality into the cursor.
+---------------------------------------------------------------------------------------------------
+Version: 0.8.0
+Date: 2026-04-30
+  Major Features:
+    - Replaced slot-filter priorities with a priority GUI that opens beside the chest. Items are swept out of the chest into a per-surface store and shown as an ordered list with reorder controls.
+    - Added a per-item quality strategy: highest or lowest quality first, or highest or lowest count first, with runtime settings for the defaults applied to newly seen fuel and ammunition.
+  Optimizations:
+    - Reworked the tick loop around a per-surface inventory snapshot, bulk content reads, cached quality strings, and a deferred commit phase, cutting the per-consumer cost in bases with many consumers.
+    - Entity lifecycle handling now tracks unit numbers directly and shares one metadata record across registration, filling, and cleanup.
+    - Fuel and ammunition classification moved to static sets built at startup, removing per-tick prototype lookups.
+  Changes:
+    - Removed per-item fill overrides in favor of one uniform maximum, with stack size limiting low-stack items naturally.
+    - Removed fair-share distribution. Every consumer is filled to the same maximum regardless of how many others are waiting.
+---------------------------------------------------------------------------------------------------
+Version: 0.7.0
+Date: 2026-04-30
+  Features:
+    - Consumption now draws from earlier chest slots first, so slot filters set the priority order. Put uranium rounds in slot 1 and piercing rounds in slot 2 and turrets prefer uranium while it lasts.
+---------------------------------------------------------------------------------------------------
+Version: 0.6.0
+Date: 2026-04-30
+  Features:
+    - Added fair-share distribution: when supply is scarce, per-fill amounts are capped by the number of waiting consumers so no single turret hoards the pool.
+    - Newly placed consumers are filled immediately instead of waiting for their turn in the sweep.
+---------------------------------------------------------------------------------------------------
+Version: 0.5.0
+Date: 2026-04-30
+  Features:
+    - Recipe cost and technology unlock are configurable again through the "cost" and "availability" startup settings. The default recipe is a steel chest, 3 electronic circuits, and 1 advanced circuit, unlocked with construction robotics.
+  Optimizations:
+    - Cached the shared chest per surface for constant-time inventory access in the hot path.
+  Changes:
+    - Removed the old standalone chest prototype and its migration now that only the linked chest remains.
+---------------------------------------------------------------------------------------------------
+Version: 0.4.0
+Date: 2026-04-30
+  Major Features:
+    - The chest is now a linked container that shares one inventory across every auto-loader chest on the same surface, grouped by a deterministic per-surface link. Filling dropped from checking every chest against every consumer to a single pass, a large performance win in bases with many chests.
+  Changes:
+    - Existing chests are converted automatically on load and their contents merged into the shared surface pool.
+    - Removed the /al-inspect and /al-status debug commands, which no longer applied to the shared inventory model.
+    - Removed the refill trigger setting. Consumers below the maximum fill are now topped up unconditionally.
+---------------------------------------------------------------------------------------------------
+Version: 0.3.1
+Date: 2026-04-30
+  Optimizations:
+    - Consumer removal is now constant time via swap-and-pop instead of compacting the whole queue.
+---------------------------------------------------------------------------------------------------
+Version: 0.3.0
+Date: 2026-04-30
+  Features:
+    - Added the /al-inspect and /al-status commands for inventory dumps, dry-run fill traces, and system statistics.
+    - The last fill tick is now tracked per consumer to help diagnose entities that are not being served.
+---------------------------------------------------------------------------------------------------
+Version: 0.2.1
+Date: 2026-04-29
+  Bugfixes:
+    - Fixed the rescan looping forever when no surface held any entities, and guaranteed forward progress on both rescanning and filling.
+---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+Date: 2026-04-29
+  Changes:
+    - Replaced the hardcoded list of supported entity types with a periodic rescan, so consumers are picked up even when they appear without a build event, such as from scripts or editor pasting. Rescanning and filling split a shared work budget to keep the cost bounded.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 2026-04-28
+  Major Features:
+    - Adds the auto-loader chest, which automatically distributes ammunition and fuel to turrets, vehicles, locomotives, and burner-powered machines on the same surface. Chests aggregate their contents per surface and serve consumers round-robin on a configurable batch size and tick interval.
+  Features:
+    - Added the "maximum fill" setting, capping how much of an item is inserted per inventory.
+    - Turrets with an automated ammunition count in their prototype use that value as their cap instead of the global default.
+  Changes:
+    - The chest is based on the steel chest for better mod compatibility.
