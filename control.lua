@@ -231,14 +231,39 @@ local function character_categories(entity)
   return accepted
 end
 
+-- Once the force unlocks logistic requests, the player's request list becomes
+-- the source of truth for character ammo: returns the set of requested ammo
+-- item names (empty when personal logistics are paused or no ammo is
+-- requested), so clearing the request lets a player unload their ammo — e.g.
+-- before boarding a space platform — without the mod instantly refilling it.
+-- Returns nil while requests are still locked, so early-game characters keep
+-- getting filled unconditionally.
+local function character_requested_ammo(entity)
+  if not entity.force.character_logistic_requests then return nil end
+  local point = entity.get_requester_point()
+  if not point then return nil end
+  local requested = {}
+  if point.enabled then
+    for _, f in ipairs(point.filters or {}) do
+      -- Matched by name across qualities: a request for an ammo item at any
+      -- quality keeps every quality of it flowing from the pool.
+      if f.name and ITEM_AMMO[f.name] and (f.count or 0) > 0 then
+        requested[f.name] = true
+      end
+    end
+  end
+  return requested
+end
+
 local function fill_ammo(entry, entity, pool)
   local inv = entity.get_inventory(entry.ammo_define)
   if not inv then return end
 
-  local accepted
+  local accepted, requested
   if entry.type == "character" then
     accepted = character_categories(entity)
     if not accepted then return end
+    requested = character_requested_ammo(entity)
   end
 
   -- Top up to ammo_target total rounds (turrets reject wrong categories on
@@ -253,7 +278,8 @@ local function fill_ammo(entry, entity, pool)
 
   for _, a in ipairs(pool.ammos) do
     if budget <= 0 then break end
-    if (not accepted) or accepted[a.category] then
+    if ((not accepted) or accepted[a.category])
+      and ((not requested) or requested[a.name]) then
       local av = pool_avail(pool, a.name, a.quality)
       if av > 0 then
         local want = budget < av and budget or av
