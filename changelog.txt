@@ -1,4 +1,10 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.1.0
+Date: 2026-07-30
+  Features:
+    - Character ammo refills now respect personal logistic requests. Once a force unlocks logistic requests, gun slots are only topped up with ammo types the player is actively requesting - remove or zero the request (or pause personal logistics) and refilling stops, so you can unload your ammo and board a space platform without it being instantly replaced.
+    - Before logistic requests are unlocked, characters are filled as before, so the chest still supplies players in the early game.
+---------------------------------------------------------------------------------------------------
 Version: 1.0.0
 Date: 2026-07-19
   Info:

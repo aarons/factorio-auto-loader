@@ -55,16 +55,13 @@ The chest uses the first matching slot or item that's valid for the consumer. So
 
 If you want to prioritize consumption of higher quality ammo for example, you would use combinators to load the chest with preferred types, and only add in lower tier ammo when the preffered type runs low.
 
+**Player Ammo Respects Logistic Requests**
+
+Before your force unlocks logistic requests, the chest keeps your gun slots topped up automatically — great for the early game.
+
+Once logistic requests are unlocked, your personal requests take over: the chest only refills ammo types you are actively requesting. Remove (or zero) the ammo request — or pause personal logistics — and the refilling stops, so you can drop your ammo off and board a space platform without the mod stuffing it right back in your pockets.
+
 ## Known Issues
-
-**Player ammo refilling too quickly**
-
-It can be a challenge to remove your own ammo to get on a spaceship. I think a feature to disable filling player ammo, or to check the players logistic requests first, would be good.
-
-Work around: If you remove your guns, then it shouldn't try to fill ammo in the slot.
-Challenge: You can't remove your guns when you have ammo in the slot already lol.
-
-In practice I was able to do it, but I'll get less lazy and fix the core problem, eventually.
 
 **No proactive ammo/fuel upgrades**
 
