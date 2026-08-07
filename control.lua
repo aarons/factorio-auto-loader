@@ -13,7 +13,8 @@ local K_SETTING = "auto-loader-entities-per-tick"
 
 -- Ammo target when the prototype gives no automated_ammo_count (vehicles,
 -- characters). Caps how much ammo we keep stocked so a single entity can't drain
--- the whole pool; turrets use their own automated_ammo_count instead.
+-- the whole pool; turrets use their own automated_ammo_count instead. For
+-- characters this applies per ammo slot (each slot serves its paired gun).
 local DEFAULT_AMMO_TARGET = 10
 local FUEL_TARGET = 10
 
@@ -211,26 +212,6 @@ end
 -- Filling.
 ----------------------------------------------------------------------
 
--- Ammo categories the character can actually fire right now. nil => no gun
--- equipped, so we insert nothing (don't stuff ammo for a gun they don't have).
-local function character_categories(entity)
-  local guns = entity.get_inventory(defines.inventory.character_guns)
-  if not guns then return nil end
-  local accepted
-  for i = 1, #guns do
-    local g = guns[i]
-    if g.valid_for_read then
-      local ap = g.prototype.attack_parameters
-      local cats = ap and ap.ammo_categories
-      if cats then
-        accepted = accepted or {}
-        for _, c in ipairs(cats) do accepted[c] = true end
-      end
-    end
-  end
-  return accepted
-end
-
 -- Once the force unlocks logistic requests, the player's request list becomes
 -- the source of truth for character ammo: returns the set of requested ammo
 -- item names (empty when personal logistics are paused or no ammo is
@@ -255,19 +236,77 @@ local function character_requested_ammo(entity)
   return requested
 end
 
+-- Top up one character ammo slot to `target` rounds the paired gun accepts.
+-- A slot already holding ammo for a different gun (or any foreign item) is
+-- left untouched.
+local function fill_ammo_slot(slot, accepted, requested, target, pool)
+  if not slot then return end
+  if slot.valid_for_read then
+    local name = slot.name
+    local ac = ITEM_AMMO[name]
+    if not (ac and accepted[ac]) then return end
+    if requested and not requested[name] then return end
+    local cap = prototypes.item[name].stack_size
+    local limit = target < cap and target or cap
+    local gap = limit - slot.count
+    if gap <= 0 then return end
+    local q = slot.quality.name
+    local av = pool_avail(pool, name, q)
+    if av <= 0 then return end
+    local take = gap < av and gap or av
+    slot.count = slot.count + take
+    pool_charge(pool, name, q, take)
+  else
+    for _, a in ipairs(pool.ammos) do
+      if accepted[a.category] and ((not requested) or requested[a.name]) then
+        local av = pool_avail(pool, a.name, a.quality)
+        if av > 0 then
+          local cap = prototypes.item[a.name].stack_size
+          local want = target < cap and target or cap
+          local take = want < av and want or av
+          slot.set_stack{ name = a.name, count = take, quality = a.quality }
+          pool_charge(pool, a.name, a.quality, take)
+          return
+        end
+      end
+    end
+  end
+end
+
+-- Character ammo slots pair 1:1 with gun slots, so each slot is topped up
+-- independently with ammo its own gun can fire. Slots with no gun get nothing.
+local function fill_character_ammo(entry, entity, pool)
+  local guns = entity.get_inventory(defines.inventory.character_guns)
+  local inv = entity.get_inventory(entry.ammo_define)
+  if not (guns and inv) then return end
+  local requested = character_requested_ammo(entity)
+
+  local slots = #guns < #inv and #guns or #inv
+  for i = 1, slots do
+    local gun = guns[i]
+    if gun.valid_for_read then
+      local ap = gun.prototype.attack_parameters
+      local cats = ap and ap.ammo_categories
+      if cats then
+        local accepted = {}
+        for _, c in ipairs(cats) do accepted[c] = true end
+        fill_ammo_slot(inv[i], accepted, requested, entry.ammo_target, pool)
+      end
+    end
+  end
+end
+
 local function fill_ammo(entry, entity, pool)
+  if entry.type == "character" then
+    fill_character_ammo(entry, entity, pool)
+    return
+  end
+
   local inv = entity.get_inventory(entry.ammo_define)
   if not inv then return end
 
-  local accepted, requested
-  if entry.type == "character" then
-    accepted = character_categories(entity)
-    if not accepted then return end
-    requested = character_requested_ammo(entity)
-  end
-
-  -- Top up to ammo_target total rounds (turrets reject wrong categories on
-  -- insert; characters are pre-filtered by equipped guns).
+  -- Top up to ammo_target total rounds; turrets and vehicles reject wrong
+  -- categories on insert.
   local current = 0
   for i = 1, #inv do
     local s = inv[i]
@@ -278,16 +317,13 @@ local function fill_ammo(entry, entity, pool)
 
   for _, a in ipairs(pool.ammos) do
     if budget <= 0 then break end
-    if ((not accepted) or accepted[a.category])
-      and ((not requested) or requested[a.name]) then
-      local av = pool_avail(pool, a.name, a.quality)
-      if av > 0 then
-        local want = budget < av and budget or av
-        local inserted = inv.insert{ name = a.name, count = want, quality = a.quality }
-        if inserted > 0 then
-          pool_charge(pool, a.name, a.quality, inserted)
-          budget = budget - inserted
-        end
+    local av = pool_avail(pool, a.name, a.quality)
+    if av > 0 then
+      local want = budget < av and budget or av
+      local inserted = inv.insert{ name = a.name, count = want, quality = a.quality }
+      if inserted > 0 then
+        pool_charge(pool, a.name, a.quality, inserted)
+        budget = budget - inserted
       end
     end
   end

@@ -1,4 +1,11 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.1.1
+Date: 2026-08-06
+  Bugfixes:
+    - Fixed character ammo refills treating the whole ammo bar as one shared 10-round budget. Each ammo slot is now topped up independently with ammunition its paired gun can actually fire, so carrying two guns no longer leaves the second slot empty, and picking up a stack no longer causes the refill to land in the wrong slot.
+    - Ammo slots whose gun slot is empty are no longer filled.
+    - Ammo already sitting in a slot that its paired gun cannot fire is left untouched instead of counting against the refill budget.
+---------------------------------------------------------------------------------------------------
 Version: 1.1.0
 Date: 2026-07-30
   Features:
