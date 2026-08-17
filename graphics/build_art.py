@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the Auto-Loader chest artwork from an SVG design.
 
-Outputs (all relative to this file's directory):
+Outputs (relative to this file), sized to match the vanilla 1x1 chests:
   entity/auto-loader-chest.png         64x80 entity sprite (scale 0.5 in-game)
   entity/auto-loader-chest-shadow.png  110x46 shadow, drawn with draw_as_shadow
   icons/auto-loader-chest.png          120x64 icon with 64/32/16/8 mipmaps
@@ -9,10 +9,9 @@ Outputs (all relative to this file's directory):
 Run with the venv created next to this file:
   graphics/.venv/bin/python graphics/build_art.py
 
-The design is authored as SVG in sprite pixel coordinates (64x80) so shapes
-line up with the vanilla chest projection: a lit top face in the upper half and
-a darker front face below. cairosvg rasterises it, then a light noise/grunge
-pass in Pillow keeps it from reading as flat vector art next to Wube's sprites.
+The SVG is authored in sprite pixel coordinates (64x80): lit top face above, a
+darker front face below. cairosvg rasterises it, then a light noise pass in
+Pillow keeps it from reading as flat vector art.
 """
 
 from __future__ import annotations
@@ -27,10 +26,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 HERE = Path(__file__).resolve().parent
 
-# ---------------------------------------------------------------------------
-# Palette. Blue-steel body (continuity with the tinted look players know),
-# hazard yellow on the intake, cyan status lights (a nod to the mimic mascot).
-# ---------------------------------------------------------------------------
+# Palette: blue-steel body, hazard yellow intake, cyan status lights.
 STEEL_TOP_LIGHT = "#d3dfea"
 STEEL_TOP_MID = "#98acc2"
 STEEL_TOP_DARK = "#66788e"
