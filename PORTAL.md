@@ -54,4 +54,4 @@ If you want to prioritize consumption of higher quality ammo for example, you wo
 
 It's always great hearing from folks who enjoy a mod, find issues, or have suggestions/requests. Please feel free to reach out!
 
-Claude Fable was used in writing and editing the code and in-game assets. I'm an experienced engineer and took the time to review, edit, and redirect were appropriate to keep the code easy to understand and performant. The in-game chest artwork was entirely its own work, and not something I would have taken the time to create, so I'm happy it exists (and it's soo cute!)
+Claude Fable was used in writing and editing the code and in-game assets. I took the time to review, edit, and redirect were appropriate to keep the code easy to understand and performant. The in-game chest artwork was entirely its own work, and not something I would have taken the time to create on my own, so I'm happy it exists (and it's soo cute!)
