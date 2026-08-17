@@ -25,11 +25,12 @@ chest.max_health = steel_chest.max_health
 chest.resistances = table.deepcopy(steel_chest.resistances)
 chest.next_upgrade = nil
 
--- Graphics + icon. The mod ships its own sprites (a blue-tinted derivative of
--- the vanilla steel chest, see graphics/generate.sh) rather than reading the
--- steel-chest prototype's `icon`/`picture`: mods that reskin the vanilla chests
--- (e.g. AAI Containers & Warehouses) rewrite those fields into shapes we cannot
--- assume, and shipping our own art keeps startup independent of them.
+-- Graphics + icon. The mod ships its own original sprites (generated from an
+-- SVG design by graphics/build_art.py) rather than reading the steel-chest
+-- prototype's `icon`/`picture`: mods that reskin the vanilla chests (e.g. AAI
+-- Containers & Warehouses) rewrite those fields into shapes we cannot assume,
+-- and shipping our own art keeps startup independent of them. The sprite
+-- geometry (64x80 at scale 0.5, 110x46 shadow) matches the vanilla 1x1 chests.
 chest.icon = "__auto-loader-chest__/graphics/icons/auto-loader-chest.png"
 chest.icon_size = 64
 chest.icons = nil

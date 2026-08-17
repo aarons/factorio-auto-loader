@@ -27,7 +27,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 mkdir -p "$STAGE/$SLUG"
 cp -R control.lua data.lua settings.lua info.json changelog.txt thumbnail.png locale graphics "$STAGE/$SLUG/"
-rm -f "$STAGE/$SLUG/graphics/generate.sh"
+rm -rf "$STAGE/$SLUG/graphics/build_art.py" "$STAGE/$SLUG/graphics/.venv"
 
 (cd "$STAGE" && zip -qr "$SCRIPT_DIR/$ZIP" "$SLUG")
 
