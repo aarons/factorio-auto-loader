@@ -5,6 +5,7 @@ Outputs (relative to this file), sized to match the vanilla 1x1 chests:
   entity/auto-loader-chest.png         64x80 entity sprite (scale 0.5 in-game)
   entity/auto-loader-chest-shadow.png  110x46 shadow, drawn with draw_as_shadow
   icons/auto-loader-chest.png          120x64 icon with 64/32/16/8 mipmaps
+  ../thumbnail.png                     256x256 mod-portal thumbnail (icon x4)
 
 Run with the venv created next to this file:
   graphics/.venv/bin/python graphics/build_art.py
@@ -260,13 +261,23 @@ def build_icon() -> Image.Image:
     return sheet
 
 
+def build_thumbnail(icon_sheet: Image.Image) -> Image.Image:
+    """The 64x64 icon scaled up 4x, nearest-neighbour so pixels stay exact."""
+    return icon_sheet.crop((0, 0, 64, 64)).resize((256, 256), Image.NEAREST)
+
+
 def main() -> None:
     (HERE / "entity").mkdir(exist_ok=True)
     (HERE / "icons").mkdir(exist_ok=True)
     build_entity().save(HERE / "entity" / "auto-loader-chest.png")
     build_shadow().save(HERE / "entity" / "auto-loader-chest-shadow.png")
-    build_icon().save(HERE / "icons" / "auto-loader-chest.png")
-    print("wrote entity/auto-loader-chest.png, entity/auto-loader-chest-shadow.png, icons/auto-loader-chest.png")
+    icon_sheet = build_icon()
+    icon_sheet.save(HERE / "icons" / "auto-loader-chest.png")
+    build_thumbnail(icon_sheet).save(HERE.parent / "thumbnail.png")
+    print(
+        "wrote entity/auto-loader-chest.png, entity/auto-loader-chest-shadow.png,"
+        " icons/auto-loader-chest.png, ../thumbnail.png"
+    )
 
 
 if __name__ == "__main__":
