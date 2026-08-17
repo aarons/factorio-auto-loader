@@ -48,8 +48,10 @@ The chest uses the first matching slot or item that's valid for the consumer. So
 - for an empty turret, it will pick from the first ammo in the chest
 - for a refill turret, it will try to refill the matching ammo. If not matching ammo exists it will wait until the turret runs out, then replace with the next ammo.
 
-If you want to prioritize consumption of higher quality ammo for example, you would use combinators to load the chest with preferred types, and only add in lower tier ammo when the preffered type runs low.
+If you want to prioritize consumption of higher quality ammo for example, you would use combinators to load the chest with preferred types, and only add in lower tier ammo when the preferred type runs low.
 
-## Feedback
+## Feedback & Disclaimers
 
-It's always great hearing from folks who enjoy a mod, or have suggestions/requests. Please feel free to reach out!
+It's always great hearing from folks who enjoy a mod, find issues, or have suggestions/requests. Please feel free to reach out!
+
+Claude Fable was used in writing and editing the code and in-game assets. I'm an experienced engineer and took the time to review, edit, and redirect were appropriate to keep the code easy to understand and performant. The in-game chest artwork was entirely its own work, and not something I would have taken the time to create, so I'm happy it exists (and it's soo cute!)
