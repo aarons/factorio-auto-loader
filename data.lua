@@ -6,29 +6,9 @@
 -- per surface. This is the supply half of the auto-fill chest: the strategy
 -- that distributes this supply into turrets and burners is not built yet.
 
+local util = require("util")
+
 local CHEST = "auto-loader-chest"
-
--- A subtle tint so the chest reads as distinct from a plain steel chest.
-local CHEST_TINT = { r = 0.45, g = 0.75, b = 1.0, a = 1.0 }
-
-local function tint_sprite_layer(layer, tint)
-  if type(layer) ~= "table" then return end
-  if layer.draw_as_shadow then return end
-  layer.tint = tint
-end
-
-local function tint_sprite(sprite, tint)
-  if type(sprite) ~= "table" then return end
-  if sprite.layers then
-    for _, layer in ipairs(sprite.layers) do tint_sprite_layer(layer, tint) end
-  elseif sprite.sheets then
-    for _, sheet in ipairs(sprite.sheets) do tint_sprite_layer(sheet, tint) end
-  elseif sprite.sheet then
-    tint_sprite_layer(sprite.sheet, tint)
-  else
-    tint_sprite_layer(sprite, tint)
-  end
-end
 
 local linked_chest = data.raw["linked-container"]["linked-chest"]
 assert(linked_chest, "auto-loader: vanilla linked-chest not found")
@@ -45,12 +25,35 @@ chest.max_health = steel_chest.max_health
 chest.resistances = table.deepcopy(steel_chest.resistances)
 chest.next_upgrade = nil
 
--- Graphics + icon, tinted for distinction.
-chest.icons = { { icon = steel_chest.icon, icon_size = steel_chest.icon_size, tint = CHEST_TINT } }
-chest.icon = nil
-chest.icon_size = nil
-chest.picture = table.deepcopy(steel_chest.picture)
-tint_sprite(chest.picture, CHEST_TINT)
+-- Graphics + icon. The mod ships its own sprites (a blue-tinted derivative of
+-- the vanilla steel chest, see graphics/generate.sh) rather than reading the
+-- steel-chest prototype's `icon`/`picture`: mods that reskin the vanilla chests
+-- (e.g. AAI Containers & Warehouses) rewrite those fields into shapes we cannot
+-- assume, and shipping our own art keeps startup independent of them.
+chest.icon = "__auto-loader-chest__/graphics/icons/auto-loader-chest.png"
+chest.icon_size = 64
+chest.icons = nil
+chest.picture = {
+  layers = {
+    {
+      filename = "__auto-loader-chest__/graphics/entity/auto-loader-chest.png",
+      priority = "extra-high",
+      width = 64,
+      height = 80,
+      shift = util.by_pixel(-0.25, -0.5),
+      scale = 0.5,
+    },
+    {
+      filename = "__auto-loader-chest__/graphics/entity/auto-loader-chest-shadow.png",
+      priority = "extra-high",
+      width = 110,
+      height = 46,
+      shift = util.by_pixel(12.25, 8),
+      draw_as_shadow = true,
+      scale = 0.5,
+    },
+  },
+}
 
 -- Slot count and stack compression are player-configurable (startup settings);
 -- multiplied stacks give a compact pooled supply.
@@ -75,7 +78,8 @@ chest.circuit_wire_max_distance = steel_chest.circuit_wire_max_distance
 local item = {
   type = "item",
   name = CHEST,
-  icons = table.deepcopy(chest.icons),
+  icon = chest.icon,
+  icon_size = chest.icon_size,
   subgroup = "storage",
   order = "b[storage]-z[auto-loader-chest]",
   place_result = CHEST,

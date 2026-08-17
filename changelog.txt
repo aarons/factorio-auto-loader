@@ -1,4 +1,11 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.1.2
+Date: 2026-08-17
+  Bugfixes:
+    - Fixed a startup crash ("Key \"icon\" not found ... item.auto-loader-chest.icons[0]") when a mod such as AAI Containers & Warehouses reskins the steel chest with a layered icon.
+  Graphics:
+    - The chest now ships its own icon and entity sprites instead of deriving them from the steel-chest prototype at load time, so other mods that reskin vanilla chests can no longer break it. The look is unchanged.
+---------------------------------------------------------------------------------------------------
 Version: 1.1.1
 Date: 2026-08-06
   Bugfixes:
