@@ -4,13 +4,14 @@
 Outputs (relative to this file), sized to match the vanilla 1x1 chests:
   entity/auto-loader-chest.png         64x80 entity sprite (scale 0.5 in-game)
   entity/auto-loader-chest-shadow.png  110x46 shadow, drawn with draw_as_shadow
-  entity/auto-loader-chest-connector.png            64x80 circuit-connector overlay
-  entity/auto-loader-chest-connector-led-{red,green}.png  64x80 LED glows for it
+  entity/auto-loader-chest-connector-<style>.png    64x80 circuit-connector overlay,
+                                                    one per CONNECTOR_STYLES entry
   icons/auto-loader-chest.png          120x64 icon with 64/32/16/8 mipmaps
   ../thumbnail.png                     256x256 mod-portal thumbnail (icon x4)
 
 Run with the venv created next to this file:
   graphics/.venv/bin/python graphics/build_art.py
+  graphics/.venv/bin/python graphics/build_art.py --preview /some/dir   # + comparison sheet
 
 The SVG is authored in sprite pixel coordinates (64x80): lit top face above, a
 darker front face below. cairosvg rasterises it, then a light noise pass in
@@ -21,11 +22,13 @@ from __future__ import annotations
 
 import io
 import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import cairosvg
 import numpy
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = Path(__file__).resolve().parent
 
@@ -49,6 +52,9 @@ LIGHT_CYAN = "#6fe4ff"
 LIGHT_CYAN_CORE = "#f2feff"
 BRASS_LIGHT = "#e2c060"
 BRASS_DARK = "#8a6c22"
+COPPER_LIGHT = "#f2b98e"
+COPPER_MID = "#c9743d"
+COPPER_DARK = "#743a19"
 
 
 def svg_open(width: int, height: int, view_box: str) -> str:
@@ -83,6 +89,15 @@ def svg_open(width: int, height: int, view_box: str) -> str:
     <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="{BRASS_LIGHT}"/>
       <stop offset="1" stop-color="{BRASS_DARK}"/>
+    </linearGradient>
+    <linearGradient id="copper" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="{COPPER_MID}"/>
+      <stop offset="0.35" stop-color="{COPPER_LIGHT}"/>
+      <stop offset="1" stop-color="{COPPER_DARK}"/>
+    </linearGradient>
+    <linearGradient id="slat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="{STEEL_FRONT_LIGHT}"/>
+      <stop offset="1" stop-color="{STEEL_FRONT_MID}"/>
     </linearGradient>
     <radialGradient id="bolt" cx="0.35" cy="0.35" r="0.7">
       <stop offset="0" stop-color="{BOLT_LIGHT}"/>
@@ -200,33 +215,54 @@ def chest_svg(width: int, height: int, view_box: str) -> str:
 """
 
 
-# --- Circuit connector overlay ("mouth" style) --------------------------------
+# --- Circuit connector overlays --------------------------------------------------
 #
 # Factorio draws CircuitConnectorSprites.connector_main on top of the entity
-# picture only while a wire is attached, so this overlay is how the chest
-# changes its look when wired: the front-panel slats part around a dark bite
-# gap and the wire ends on pins inside it -- the chest is biting the wire.
+# picture only while a wire is attached, so these overlays are how the chest
+# changes its look when wired. Several styles are built side by side so they
+# can be compared in-game; CONNECTOR_STYLE in data.lua picks the one used.
 #
-# The overlay is authored on the same 64x80 canvas as the entity sprite (only
-# the mouth region is opaque) so data.lua can reuse the entity layer's shift.
-# The engine crops transparent borders at load, so the empty canvas is free.
+# Every overlay is authored on the same 64x80 canvas as the entity sprite (only
+# its patch of the front panel is opaque) so data.lua can reuse the entity
+# layer's shift. The engine crops transparent borders at load, so the empty
+# canvas is free.
 #
-# Keep these in sync with data.lua (WIRE_PIN_RED / WIRE_PIN_GREEN there).
+# No LED sprites: the connector's red/green LEDs show circuit *write* mode and
+# the blue one *read* mode (FFF-210), and a linked-container has neither, so
+# data.lua gives the (mandatory) LED slots empty sprites.
+#
+# The panel the overlays repaint is x 8..56, y 49..68 (see chest_svg): three
+# horizontal slats separated by dark rib lines at y 55.5 and 62.5, each slat
+# with a lit line 1px below its top edge (y 49.5, 56.5, 63.5).
+PANEL_TOP, PANEL_BOTTOM = 49.0, 68.0
+RIB_UPPER, RIB_LOWER = 55.5, 62.5
+
+
+@dataclass(frozen=True)
+class ConnectorStyle:
+    """One wired-look variant. Pin coordinates are sprite px; data.lua carries
+    a matching CONNECTOR_STYLES table, so keep the two in sync."""
+
+    description: str
+    svg: Callable[[], str]
+    wire_pin_red: tuple[float, float]
+    wire_pin_green: tuple[float, float]
+
+
+# --- "mouth": the original bite -------------------------------------------------
+#
+# The front-panel slats part around a dark bite gap and the wire ends on pins
+# inside it -- the chest is biting the wire.
 BITE_CENTER = (32.0, 59.0)  # sprite px; middle of the ribbed front panel
 BITE_RADIUS_X = 8.0
 BITE_RADIUS_Y = 4.5
-WIRE_PIN_RED = (28.0, 59.0)
-WIRE_PIN_GREEN = (36.0, 59.0)
-LED_RED = "#ff3b2e"
-LED_GREEN = "#4dff5a"
+MOUTH_PIN_RED = (28.0, 59.0)
+MOUTH_PIN_GREEN = (36.0, 59.0)
 
 
-def connector_svg() -> str:
+def mouth_svg() -> str:
     """Parted slats + bite gap + wire pins, drawn over the ribbed front panel.
-
-    The panel it overlays is x 8..56, y 49..68 with dark rib lines at y 55.5
-    and 62.5 (see chest_svg). Only x 20..44 is repainted.
-    """
+    Only x 20..44 is repainted."""
     cx, cy = BITE_CENTER
     rx, ry = BITE_RADIUS_X, BITE_RADIUS_Y
     left, right = 20, 44
@@ -234,12 +270,12 @@ def connector_svg() -> str:
     # 0.25*P0 + 0.5*P1 + 0.25*P2, so control y = apex - (base - apex).
     upper_apex = cy - ry - 0.5
     lower_apex = cy + ry + 0.5
-    upper_control = 2 * upper_apex - 55.5
-    lower_control = 2 * lower_apex - 62.5
-    upper_rib = f"M{left} 55.5 L{cx - rx - 2} 55.5 Q{cx} {upper_control} {cx + rx + 2} 55.5 L{right} 55.5"
-    lower_rib = f"M{left} 62.5 L{cx - rx - 2} 62.5 Q{cx} {lower_control} {cx + rx + 2} 62.5 L{right} 62.5"
-    upper_lit = f"M{left} 56.5 L{cx - rx - 2} 56.5 Q{cx} {upper_control + 1} {cx + rx + 2} 56.5 L{right} 56.5"
-    lower_lit = f"M{left} 63.5 L{cx - rx - 2} 63.5 Q{cx} {lower_control + 1} {cx + rx + 2} 63.5 L{right} 63.5"
+    upper_control = 2 * upper_apex - RIB_UPPER
+    lower_control = 2 * lower_apex - RIB_LOWER
+    upper_rib = f"M{left} {RIB_UPPER} L{cx - rx - 2} {RIB_UPPER} Q{cx} {upper_control} {cx + rx + 2} {RIB_UPPER} L{right} {RIB_UPPER}"
+    lower_rib = f"M{left} {RIB_LOWER} L{cx - rx - 2} {RIB_LOWER} Q{cx} {lower_control} {cx + rx + 2} {RIB_LOWER} L{right} {RIB_LOWER}"
+    upper_lit = f"M{left} {RIB_UPPER + 1} L{cx - rx - 2} {RIB_UPPER + 1} Q{cx} {upper_control + 1} {cx + rx + 2} {RIB_UPPER + 1} L{right} {RIB_UPPER + 1}"
+    lower_lit = f"M{left} {RIB_LOWER + 1} L{cx - rx - 2} {RIB_LOWER + 1} Q{cx} {lower_control + 1} {cx + rx + 2} {RIB_LOWER + 1} L{right} {RIB_LOWER + 1}"
 
     # Teeth: small wedges pointing into the gap from its top and bottom edges.
     teeth = []
@@ -258,7 +294,7 @@ def connector_svg() -> str:
 
     return svg_open(64, 80, "0 0 64 80") + f"""
   <!-- repaint the panel strip so the straight rib lines vanish under the bite -->
-  <rect x="{left}" y="49" width="{right - left}" height="19" fill="url(#front)"/>
+  <rect x="{left}" y="{PANEL_TOP}" width="{right - left}" height="{PANEL_BOTTOM - PANEL_TOP}" fill="url(#front)"/>
 
   <!-- ribs bowing around the gap -->
   <g fill="none" stroke="{STEEL_EDGE}" stroke-width="1.2">
@@ -281,23 +317,131 @@ def connector_svg() -> str:
   </g>
 
   <!-- wire pins the red / green wires terminate on -->
-  {pin(*WIRE_PIN_RED)}
-  {pin(*WIRE_PIN_GREEN)}
+  {pin(*MOUTH_PIN_RED)}
+  {pin(*MOUTH_PIN_GREEN)}
 </svg>
 """
 
 
-def led_svg(x: float, y: float, colour: str) -> str:
-    """A small glow around a wire pin, drawn as a draw_as_glow LED sprite."""
+# --- "hatch" / "hatch-open" / "socket": copper leads in a terminal bay ----------
+#
+# No lips: a shallow terminal bay is cut into the middle slat and two copper
+# leads stand in it. In the hatch styles the section of slat covering the bay
+# has slid up over the slat above (proud, with a drop shadow), which is what
+# uncovers the leads -- read literally it is a sliding access cover, read
+# loosely it is a lip lifting off two teeth.
+BAY_LEFT, BAY_RIGHT = 22.0, 42.0  # x extent of the bay / the sliding slat section
+LEAD_X = (28.0, 36.0)  # red, green
+LEAD_HALF_WIDTH = 1.5
+LEAD_TOP = RIB_UPPER + 1.2  # y of the leads' rounded tops (in the bay's shadow)
+LEAD_FOOT = RIB_LOWER - 0.4  # y where the leads meet the bay floor
+
+
+def copper_lead(x: float, top: float) -> str:
+    """A short copper post with a rounded head, standing on the bay floor."""
+    return f"""
+    <rect x="{x - LEAD_HALF_WIDTH - 0.4}" y="{top - 0.4}" width="{2 * LEAD_HALF_WIDTH + 0.8}" height="{LEAD_FOOT - top + 0.4}" rx="{LEAD_HALF_WIDTH + 0.4}" fill="{STEEL_EDGE}"/>
+    <rect x="{x - LEAD_HALF_WIDTH}" y="{top}" width="{2 * LEAD_HALF_WIDTH}" height="{LEAD_FOOT - top}" rx="{LEAD_HALF_WIDTH}" fill="url(#copper)"/>
+    <line x1="{x - 0.45}" y1="{top + 1.1}" x2="{x - 0.45}" y2="{LEAD_FOOT - 0.9}" stroke="{COPPER_LIGHT}" stroke-opacity="0.85" stroke-width="0.5"/>
+    <circle cx="{x}" cy="{top + 1.1}" r="0.55" fill="{COPPER_DARK}" fill-opacity="0.75"/>"""
+
+
+def bay_svg(left: float, right: float, top: float, bottom: float, lead_top: float) -> str:
+    """Dark recess with a framed edge, lit left wall and floor, and the two leads."""
+    leads = "".join(copper_lead(x, lead_top) for x in LEAD_X)
+    return f"""
+  <!-- terminal bay cut into the slat -->
+  <rect x="{left - 0.6}" y="{top - 0.6}" width="{right - left + 1.2}" height="{bottom - top + 1.2}" rx="0.6" fill="{STEEL_EDGE}"/>
+  <rect x="{left}" y="{top}" width="{right - left}" height="{bottom - top}" rx="0.3" fill="url(#intake)"/>
+  <line x1="{left + 0.4}" y1="{top}" x2="{left + 0.4}" y2="{bottom}" stroke="#ffffff" stroke-opacity="0.12" stroke-width="0.6"/>
+  <line x1="{left}" y1="{bottom - 0.4}" x2="{right}" y2="{bottom - 0.4}" stroke="#ffffff" stroke-opacity="0.10" stroke-width="0.6"/>
+
+  <!-- copper leads the red / green wires terminate on -->
+  <g>{leads}
+  </g>"""
+
+
+def hatch_svg(slide: float) -> str:
+    """The middle slat section over the bay slid up by `slide` px.
+
+    slide < RIB_LOWER - RIB_UPPER leaves the slat's lower edge hanging over the
+    bay, so the leads peek out from under it; slide of a full slat height
+    parks it flush on the slat above and opens the whole bay.
+    """
+    slat_top = RIB_UPPER - slide
+    slat_bottom = RIB_LOWER - slide
     return svg_open(64, 80, "0 0 64 80") + f"""
-  <radialGradient id="led" cx="0.5" cy="0.5" r="0.5">
-    <stop offset="0" stop-color="#ffffff" stop-opacity="0.75"/>
-    <stop offset="0.35" stop-color="{colour}" stop-opacity="0.7"/>
-    <stop offset="1" stop-color="{colour}" stop-opacity="0"/>
-  </radialGradient>
-  <circle cx="{x}" cy="{y}" r="2.6" fill="url(#led)"/>
+  <!-- repaint the strip so the ribs, lit lines and slat all restart cleanly -->
+  <rect x="{BAY_LEFT - 2}" y="{PANEL_TOP}" width="{BAY_RIGHT - BAY_LEFT + 4}" height="{PANEL_BOTTOM - PANEL_TOP}" fill="url(#front)"/>
+  <g stroke="{STEEL_EDGE}" stroke-width="1.2">
+    <line x1="{BAY_LEFT - 2}" y1="{RIB_UPPER}" x2="{BAY_RIGHT + 2}" y2="{RIB_UPPER}"/>
+    <line x1="{BAY_LEFT - 2}" y1="{RIB_LOWER}" x2="{BAY_RIGHT + 2}" y2="{RIB_LOWER}"/>
+  </g>
+  <g stroke="#ffffff" stroke-width="1" opacity="0.16">
+    <line x1="{BAY_LEFT - 2}" y1="{PANEL_TOP + 0.5}" x2="{BAY_RIGHT + 2}" y2="{PANEL_TOP + 0.5}"/>
+    <line x1="{BAY_LEFT - 2}" y1="{RIB_UPPER + 1}" x2="{BAY_RIGHT + 2}" y2="{RIB_UPPER + 1}"/>
+    <line x1="{BAY_LEFT - 2}" y1="{RIB_LOWER + 1}" x2="{BAY_RIGHT + 2}" y2="{RIB_LOWER + 1}"/>
+  </g>
+{bay_svg(BAY_LEFT, BAY_RIGHT, RIB_UPPER, RIB_LOWER, LEAD_TOP)}
+
+  <!-- the slid slat section: drop shadow (light is top-left), then the plate -->
+  <rect x="{BAY_LEFT + 0.6}" y="{slat_top + 0.8}" width="{BAY_RIGHT - BAY_LEFT + 0.6}" height="{slat_bottom - slat_top + 0.8}" rx="0.8" fill="#000000" fill-opacity="0.45"/>
+  <rect x="{BAY_LEFT}" y="{slat_top}" width="{BAY_RIGHT - BAY_LEFT}" height="{slat_bottom - slat_top}" rx="0.7" fill="{STEEL_EDGE}"/>
+  <rect x="{BAY_LEFT + 0.6}" y="{slat_top + 0.6}" width="{BAY_RIGHT - BAY_LEFT - 1.2}" height="{slat_bottom - slat_top - 1.2}" rx="0.4" fill="url(#slat)"/>
+  <line x1="{BAY_LEFT + 1}" y1="{slat_top + 1.1}" x2="{BAY_RIGHT - 1}" y2="{slat_top + 1.1}" stroke="#ffffff" stroke-opacity="0.28" stroke-width="0.8"/>
+  <line x1="{BAY_LEFT + 1}" y1="{slat_bottom - 1.0}" x2="{BAY_RIGHT - 1}" y2="{slat_bottom - 1.0}" stroke="#000000" stroke-opacity="0.30" stroke-width="0.7"/>
+  <!-- finger pull -->
+  <rect x="29.5" y="{slat_top + 2.4}" width="5" height="1.4" rx="0.7" fill="{STEEL_EDGE}" fill-opacity="0.8"/>
+  <line x1="30" y1="{slat_top + 4.1}" x2="34" y2="{slat_top + 4.1}" stroke="#ffffff" stroke-opacity="0.18" stroke-width="0.6"/>
 </svg>
 """
+
+
+SOCKET_LEFT, SOCKET_RIGHT = 24.5, 39.5
+SOCKET_TOP, SOCKET_BOTTOM = RIB_UPPER + 1.0, RIB_LOWER - 0.6
+
+
+def socket_svg() -> str:
+    """No moving parts: a small recessed terminal block let into the middle
+    slat, the two copper leads inside it. The quietest of the styles."""
+    return svg_open(64, 80, "0 0 64 80") + f"""
+  <!-- retaining plate around the socket, flush with the slat -->
+  <rect x="{SOCKET_LEFT - 1.8}" y="{SOCKET_TOP - 0.9}" width="{SOCKET_RIGHT - SOCKET_LEFT + 3.6}" height="{SOCKET_BOTTOM - SOCKET_TOP + 1.5}" rx="0.8" fill="{STEEL_EDGE}"/>
+  <rect x="{SOCKET_LEFT - 1.3}" y="{SOCKET_TOP - 0.5}" width="{SOCKET_RIGHT - SOCKET_LEFT + 2.6}" height="{SOCKET_BOTTOM - SOCKET_TOP + 0.8}" rx="0.5" fill="url(#slat)"/>
+{bay_svg(SOCKET_LEFT, SOCKET_RIGHT, SOCKET_TOP, SOCKET_BOTTOM, SOCKET_TOP + 0.9)}
+</svg>
+"""
+
+
+HATCH_SLIDE = 5.0
+HATCH_OPEN_SLIDE = RIB_LOWER - RIB_UPPER - 0.5  # parks the slat over the one above
+
+CONNECTOR_STYLES: dict[str, ConnectorStyle] = {
+    "mouth": ConnectorStyle(
+        "front slats part around a bite gap; brass pins inside",
+        mouth_svg,
+        MOUTH_PIN_RED,
+        MOUTH_PIN_GREEN,
+    ),
+    "hatch": ConnectorStyle(
+        "middle-slat section slides part-way up; copper leads peek out under it",
+        lambda: hatch_svg(HATCH_SLIDE),
+        (LEAD_X[0], RIB_LOWER - HATCH_SLIDE + 1.6),
+        (LEAD_X[1], RIB_LOWER - HATCH_SLIDE + 1.6),
+    ),
+    "hatch-open": ConnectorStyle(
+        "middle-slat section slides fully up; the whole terminal bay is open",
+        lambda: hatch_svg(HATCH_OPEN_SLIDE),
+        (LEAD_X[0], LEAD_TOP + 1.2),
+        (LEAD_X[1], LEAD_TOP + 1.2),
+    ),
+    "socket": ConnectorStyle(
+        "no moving parts; copper leads in a small recessed terminal block",
+        socket_svg,
+        (LEAD_X[0], SOCKET_TOP + 2.0),
+        (LEAD_X[1], SOCKET_TOP + 2.0),
+    ),
+}
 
 
 def render_svg(svg: str, width: int, height: int, supersample: int = 4) -> Image.Image:
@@ -341,33 +485,44 @@ def build_entity() -> Image.Image:
     return grunge(sprite)
 
 
-def build_connector() -> Image.Image:
+def build_connector(style: ConnectorStyle) -> Image.Image:
     """Same canvas + same grunge seed as the entity, so overlay metal matches."""
-    return grunge(render_svg(connector_svg(), 64, 80))
+    return grunge(render_svg(style.svg(), 64, 80))
 
 
-def build_connector_led(colour: str) -> Image.Image:
-    x, y = WIRE_PIN_RED if colour == "red" else WIRE_PIN_GREEN
-    return render_svg(led_svg(x, y, LED_RED if colour == "red" else LED_GREEN), 64, 80)
+def build_connector_preview(entity: Image.Image, connectors: dict[str, Image.Image], zoom: int = 6) -> Image.Image:
+    """Plain entity beside every style wired up (overlay + fake wires), zoomed
+    and labelled, for eyeballing the variants side by side."""
+    tile_width, tile_height, origin = 96, 108, (16, 22)
+    label_height = 28
+    sheet = Image.new(
+        "RGBA",
+        (tile_width * zoom * (len(connectors) + 1), tile_height * zoom + label_height),
+        (0, 0, 0, 255),
+    )
+    font = ImageFont.load_default(size=18)
+    labels = ImageDraw.Draw(sheet)
 
+    def tile(label: str, index: int, paint: Callable[[Image.Image], None]) -> None:
+        frame = Image.new("RGBA", (tile_width, tile_height), (96, 72, 48, 255))
+        frame.alpha_composite(entity, origin)
+        paint(frame)
+        zoomed = frame.resize((tile_width * zoom, tile_height * zoom), Image.NEAREST)
+        sheet.alpha_composite(zoomed, (index * tile_width * zoom, label_height))
+        labels.text((index * tile_width * zoom + 8, 6), label, fill=(230, 230, 230, 255), font=font)
 
-def build_connector_preview(entity: Image.Image, connector: Image.Image, leds: list[Image.Image], zoom: int = 8) -> Image.Image:
-    """Entity + overlay + fake wires, zoomed, for eyeballing the wired look."""
-    frame = Image.new("RGBA", (64 * 3, 80 * 2), (96, 72, 48, 255))
-    plain = frame.copy()
-    plain.alpha_composite(entity, (64, 40))
-    wired = frame.copy()
-    wired.alpha_composite(entity, (64, 40))
-    wired.alpha_composite(connector, (64, 40))
-    for led in leds:
-        wired.alpha_composite(led, (64, 40))
-    draw = ImageDraw.Draw(wired)
-    for (px, py), colour in ((WIRE_PIN_RED, (232, 48, 40)), (WIRE_PIN_GREEN, (54, 200, 70))):
-        draw.line((0, 30, 64 + px, 40 + py), fill=colour, width=1)
-    sheet = Image.new("RGBA", (frame.width * 2, frame.height), (0, 0, 0, 255))
-    sheet.alpha_composite(plain, (0, 0))
-    sheet.alpha_composite(wired, (frame.width, 0))
-    return sheet.resize((sheet.width * zoom, sheet.height * zoom), Image.NEAREST)
+    tile("plain", 0, lambda frame: None)
+    for index, (name, connector) in enumerate(connectors.items(), start=1):
+        style = CONNECTOR_STYLES[name]
+
+        def paint(frame: Image.Image, connector=connector, style=style) -> None:
+            frame.alpha_composite(connector, origin)
+            draw = ImageDraw.Draw(frame)
+            for (px, py), colour in ((style.wire_pin_red, (232, 48, 40)), (style.wire_pin_green, (54, 200, 70))):
+                draw.line((0, 8, origin[0] + px, origin[1] + py), fill=colour, width=1)
+
+        tile(name, index, paint)
+    return sheet
 
 
 def build_shadow() -> Image.Image:
@@ -409,21 +564,21 @@ def main(preview_dir: Path | None) -> None:
     entity = build_entity()
     entity.save(HERE / "entity" / "auto-loader-chest.png")
     build_shadow().save(HERE / "entity" / "auto-loader-chest-shadow.png")
-    connector = build_connector()
-    connector.save(HERE / "entity" / "auto-loader-chest-connector.png")
-    leds = [build_connector_led("red"), build_connector_led("green")]
-    leds[0].save(HERE / "entity" / "auto-loader-chest-connector-led-red.png")
-    leds[1].save(HERE / "entity" / "auto-loader-chest-connector-led-green.png")
+    connectors = {}
+    for name, style in CONNECTOR_STYLES.items():
+        connectors[name] = build_connector(style)
+        connectors[name].save(HERE / "entity" / f"auto-loader-chest-connector-{name}.png")
     icon_sheet = build_icon()
     icon_sheet.save(HERE / "icons" / "auto-loader-chest.png")
     build_thumbnail(icon_sheet).save(HERE.parent / "thumbnail.png")
     print(
         "wrote entity/auto-loader-chest.png, entity/auto-loader-chest-shadow.png,"
-        " entity/auto-loader-chest-connector*.png, icons/auto-loader-chest.png, ../thumbnail.png"
+        f" entity/auto-loader-chest-connector-{{{','.join(CONNECTOR_STYLES)}}}.png,"
+        " icons/auto-loader-chest.png, ../thumbnail.png"
     )
     if preview_dir:
         preview_dir.mkdir(parents=True, exist_ok=True)
-        build_connector_preview(entity, connector, leds).save(preview_dir / "connector-preview.png")
+        build_connector_preview(entity, connectors).save(preview_dir / "connector-preview.png")
         print(f"wrote {preview_dir / 'connector-preview.png'}")
 
 
@@ -431,7 +586,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--preview", metavar="DIR", type=Path, help="also write a zoomed plain-vs-wired comparison PNG to DIR")
+    parser.add_argument("--preview", metavar="DIR", type=Path, help="also write a zoomed plain-vs-each-style comparison PNG to DIR")
     arguments = parser.parse_args()
     os.chdir(HERE)
     main(arguments.preview)

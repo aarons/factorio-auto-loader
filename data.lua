@@ -72,30 +72,45 @@ chest.surface_conditions = nil
 -- Circuit connector -----------------------------------------------------------
 --
 -- CONNECTOR_STYLE picks how the chest looks while a circuit wire is attached:
---   "vanilla" - the stock chest connector box at the lower right, as inherited
---               from the linked-chest we copied (2.1's "chest-single").
---   "mouth"   - our own: the front-panel slats part around a bite gap and the
---               wire ends on pins inside it, so the chest is biting the wire.
---               Art comes from graphics/build_art.py (connector_svg).
+--   "vanilla"    - the stock chest connector box at the lower right, as
+--                  inherited from the linked-chest we copied (2.1's
+--                  "chest-single").
+--   "mouth"      - the front-panel slats part around a bite gap and the wire
+--                  ends on brass pins inside it: the chest is biting the wire.
+--   "hatch"      - a section of the middle front slat has slid part-way up,
+--                  uncovering two copper wire leads in a shallow terminal bay
+--                  beneath its lip.
+--   "hatch-open" - the same section slid fully up onto the slat above, the
+--                  whole bay open.
+--   "socket"     - no moving parts: the two copper leads sit in a small
+--                  recessed terminal block let into the middle slat.
+-- Every custom style's art comes from graphics/build_art.py (CONNECTOR_STYLES
+-- there); all its variants are built and shipped so this is a one-line switch.
 --
 -- Note: LinkedContainerPrototype takes a *single* CircuitConnectorDefinition.
 -- Since 2.1 the vanilla containers use circuit_connector_definitions["chest"],
 -- which is now a vector (array) form - copying that from steel-chest silently
 -- gave us no connector sprites and a wire that snapped to the entity centre.
-local CONNECTOR_STYLE = "mouth"
+local CONNECTOR_STYLE = "socket"
+
+-- Where each style's wires terminate, in sprite pixels of the 64x80 canvas.
+-- Keep in sync with CONNECTOR_STYLES in graphics/build_art.py.
+local CONNECTOR_STYLES = {
+  mouth = { wire_pin_red = { 28, 59 }, wire_pin_green = { 36, 59 } },
+  hatch = { wire_pin_red = { 28, 59.1 }, wire_pin_green = { 36, 59.1 } },
+  ["hatch-open"] = { wire_pin_red = { 28, 57.9 }, wire_pin_green = { 36, 57.9 } },
+  socket = { wire_pin_red = { 28, 58.5 }, wire_pin_green = { 36, 58.5 } },
+}
 
 -- The overlay sprites share the entity sprite's 64x80 canvas and shift, so
--- points can be given in sprite pixels and converted here. Keep the pin
--- coordinates in sync with WIRE_PIN_RED / WIRE_PIN_GREEN in build_art.py.
+-- points can be given in sprite pixels and converted here.
 local ENTITY_SHIFT = util.by_pixel(-0.25, -0.5)
 local function sprite_pixel(x, y)
   return util.by_pixel((x - 32) / 2 - 0.25, (y - 40) / 2 - 0.5)
 end
-local WIRE_PIN_RED = { 28, 59 }
-local WIRE_PIN_GREEN = { 36, 59 }
 local WIRE_SHADOW_OFFSET = { 24, 16 } -- sprite px; where the wire's shadow lands
 
-local function overlay_sprite(file, glow)
+local function overlay_sprite(file)
   return {
     filename = "__auto-loader-chest__/graphics/entity/" .. file,
     priority = "extra-high",
@@ -103,34 +118,40 @@ local function overlay_sprite(file, glow)
     height = 80,
     shift = ENTITY_SHIFT,
     scale = 0.5,
-    draw_as_glow = glow or nil,
   }
 end
 
-local function mouth_connector()
+local function custom_connector(style_name)
+  local style = CONNECTOR_STYLES[style_name]
+  assert(style, "auto-loader: unknown CONNECTOR_STYLE " .. tostring(style_name))
+  local file_prefix = "auto-loader-chest-connector-" .. style_name
+  local red, green = style.wire_pin_red, style.wire_pin_green
   return {
     sprites = {
-      connector_main = overlay_sprite("auto-loader-chest-connector.png"),
-      led_red = overlay_sprite("auto-loader-chest-connector-led-red.png", true),
-      led_green = overlay_sprite("auto-loader-chest-connector-led-green.png", true),
-      led_blue = util.empty_sprite(), -- blue LED is the logistic-network one
+      connector_main = overlay_sprite(file_prefix .. ".png"),
+      -- The LED slots are mandatory but never lit here: red/green show circuit
+      -- *write* mode and blue *read* mode (FFF-210), and a linked-container
+      -- has no control behaviour, so there is nothing for them to indicate.
+      led_red = util.empty_sprite(),
+      led_green = util.empty_sprite(),
+      led_blue = util.empty_sprite(),
       led_light = { intensity = 0, size = 0.9 },
     },
     points = {
       wire = {
-        red = sprite_pixel(WIRE_PIN_RED[1], WIRE_PIN_RED[2]),
-        green = sprite_pixel(WIRE_PIN_GREEN[1], WIRE_PIN_GREEN[2]),
+        red = sprite_pixel(red[1], red[2]),
+        green = sprite_pixel(green[1], green[2]),
       },
       shadow = {
-        red = sprite_pixel(WIRE_PIN_RED[1] + WIRE_SHADOW_OFFSET[1], WIRE_PIN_RED[2] + WIRE_SHADOW_OFFSET[2]),
-        green = sprite_pixel(WIRE_PIN_GREEN[1] + WIRE_SHADOW_OFFSET[1], WIRE_PIN_GREEN[2] + WIRE_SHADOW_OFFSET[2]),
+        red = sprite_pixel(red[1] + WIRE_SHADOW_OFFSET[1], red[2] + WIRE_SHADOW_OFFSET[2]),
+        green = sprite_pixel(green[1] + WIRE_SHADOW_OFFSET[1], green[2] + WIRE_SHADOW_OFFSET[2]),
       },
     },
   }
 end
 
-if CONNECTOR_STYLE == "mouth" then
-  chest.circuit_connector = mouth_connector()
+if CONNECTOR_STYLE ~= "vanilla" then
+  chest.circuit_connector = custom_connector(CONNECTOR_STYLE)
 end
 chest.circuit_wire_max_distance = steel_chest.circuit_wire_max_distance
 
