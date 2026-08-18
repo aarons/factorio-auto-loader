@@ -38,7 +38,7 @@ chest.picture = {
       priority = "extra-high",
       width = 64,
       height = 80,
-      shift = util.by_pixel(-0.25, -0.5),
+      shift = util.by_pixel(-0.25, -0.5), -- keep equal to ENTITY_SHIFT below
       scale = 0.5,
     },
     {
@@ -69,8 +69,69 @@ chest.gui_mode = "none"
 -- Placeable anywhere, including space platforms.
 chest.surface_conditions = nil
 
--- Circuit readout of contents (not sure it's required, holdover from older version)
-chest.circuit_connector = table.deepcopy(steel_chest.circuit_connector)
+-- Circuit connector -----------------------------------------------------------
+--
+-- CONNECTOR_STYLE picks how the chest looks while a circuit wire is attached:
+--   "vanilla" - the stock chest connector box at the lower right, as inherited
+--               from the linked-chest we copied (2.1's "chest-single").
+--   "mouth"   - our own: the front-panel slats part around a bite gap and the
+--               wire ends on pins inside it, so the chest is biting the wire.
+--               Art comes from graphics/build_art.py (connector_svg).
+--
+-- Note: LinkedContainerPrototype takes a *single* CircuitConnectorDefinition.
+-- Since 2.1 the vanilla containers use circuit_connector_definitions["chest"],
+-- which is now a vector (array) form - copying that from steel-chest silently
+-- gave us no connector sprites and a wire that snapped to the entity centre.
+local CONNECTOR_STYLE = "mouth"
+
+-- The overlay sprites share the entity sprite's 64x80 canvas and shift, so
+-- points can be given in sprite pixels and converted here. Keep the pin
+-- coordinates in sync with WIRE_PIN_RED / WIRE_PIN_GREEN in build_art.py.
+local ENTITY_SHIFT = util.by_pixel(-0.25, -0.5)
+local function sprite_pixel(x, y)
+  return util.by_pixel((x - 32) / 2 - 0.25, (y - 40) / 2 - 0.5)
+end
+local WIRE_PIN_RED = { 28, 59 }
+local WIRE_PIN_GREEN = { 36, 59 }
+local WIRE_SHADOW_OFFSET = { 24, 16 } -- sprite px; where the wire's shadow lands
+
+local function overlay_sprite(file, glow)
+  return {
+    filename = "__auto-loader-chest__/graphics/entity/" .. file,
+    priority = "extra-high",
+    width = 64,
+    height = 80,
+    shift = ENTITY_SHIFT,
+    scale = 0.5,
+    draw_as_glow = glow or nil,
+  }
+end
+
+local function mouth_connector()
+  return {
+    sprites = {
+      connector_main = overlay_sprite("auto-loader-chest-connector.png"),
+      led_red = overlay_sprite("auto-loader-chest-connector-led-red.png", true),
+      led_green = overlay_sprite("auto-loader-chest-connector-led-green.png", true),
+      led_blue = util.empty_sprite(), -- blue LED is the logistic-network one
+      led_light = { intensity = 0, size = 0.9 },
+    },
+    points = {
+      wire = {
+        red = sprite_pixel(WIRE_PIN_RED[1], WIRE_PIN_RED[2]),
+        green = sprite_pixel(WIRE_PIN_GREEN[1], WIRE_PIN_GREEN[2]),
+      },
+      shadow = {
+        red = sprite_pixel(WIRE_PIN_RED[1] + WIRE_SHADOW_OFFSET[1], WIRE_PIN_RED[2] + WIRE_SHADOW_OFFSET[2]),
+        green = sprite_pixel(WIRE_PIN_GREEN[1] + WIRE_SHADOW_OFFSET[1], WIRE_PIN_GREEN[2] + WIRE_SHADOW_OFFSET[2]),
+      },
+    },
+  }
+end
+
+if CONNECTOR_STYLE == "mouth" then
+  chest.circuit_connector = mouth_connector()
+end
 chest.circuit_wire_max_distance = steel_chest.circuit_wire_max_distance
 
 local item = {

@@ -4,6 +4,8 @@
 Outputs (relative to this file), sized to match the vanilla 1x1 chests:
   entity/auto-loader-chest.png         64x80 entity sprite (scale 0.5 in-game)
   entity/auto-loader-chest-shadow.png  110x46 shadow, drawn with draw_as_shadow
+  entity/auto-loader-chest-connector.png            64x80 circuit-connector overlay
+  entity/auto-loader-chest-connector-led-{red,green}.png  64x80 LED glows for it
   icons/auto-loader-chest.png          120x64 icon with 64/32/16/8 mipmaps
   ../thumbnail.png                     256x256 mod-portal thumbnail (icon x4)
 
@@ -49,12 +51,9 @@ BRASS_LIGHT = "#e2c060"
 BRASS_DARK = "#8a6c22"
 
 
-def chest_svg(width: int, height: int, view_box: str) -> str:
-    """The chest design in 64x80 sprite coordinates.
-
-    Layout (y): lid top face 1..33, lid thickness 33..38, front face 38..74.
-    `view_box` selects the region rendered (the icon uses a tighter crop).
-    """
+def svg_open(width: int, height: int, view_box: str) -> str:
+    """Opening tag plus the shared gradient/pattern defs, so every sprite drawn
+    in the 64x80 chest coordinate space shades identically."""
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="{view_box}">
   <defs>
     <linearGradient id="top" x1="0" y1="0" x2="0.6" y2="1">
@@ -104,7 +103,16 @@ def chest_svg(width: int, height: int, view_box: str) -> str:
       <rect width="8" height="16" fill="{HAZARD_BLACK}"/>
     </pattern>
   </defs>
+"""
 
+
+def chest_svg(width: int, height: int, view_box: str) -> str:
+    """The chest design in 64x80 sprite coordinates.
+
+    Layout (y): lid top face 1..33, lid thickness 33..38, front face 38..74.
+    `view_box` selects the region rendered (the icon uses a tighter crop).
+    """
+    return svg_open(width, height, view_box) + f"""
   <!-- ===================== FRONT FACE (drawn first, lid overlaps it) ===================== -->
   <rect x="1" y="34" width="62" height="40" rx="2" fill="{STEEL_EDGE}"/>
   <rect x="2" y="35" width="60" height="38" rx="1.5" fill="url(#front)"/>
@@ -192,6 +200,106 @@ def chest_svg(width: int, height: int, view_box: str) -> str:
 """
 
 
+# --- Circuit connector overlay ("mouth" style) --------------------------------
+#
+# Factorio draws CircuitConnectorSprites.connector_main on top of the entity
+# picture only while a wire is attached, so this overlay is how the chest
+# changes its look when wired: the front-panel slats part around a dark bite
+# gap and the wire ends on pins inside it -- the chest is biting the wire.
+#
+# The overlay is authored on the same 64x80 canvas as the entity sprite (only
+# the mouth region is opaque) so data.lua can reuse the entity layer's shift.
+# The engine crops transparent borders at load, so the empty canvas is free.
+#
+# Keep these in sync with data.lua (WIRE_PIN_RED / WIRE_PIN_GREEN there).
+BITE_CENTER = (32.0, 59.0)  # sprite px; middle of the ribbed front panel
+BITE_RADIUS_X = 8.0
+BITE_RADIUS_Y = 4.5
+WIRE_PIN_RED = (28.0, 59.0)
+WIRE_PIN_GREEN = (36.0, 59.0)
+LED_RED = "#ff3b2e"
+LED_GREEN = "#4dff5a"
+
+
+def connector_svg() -> str:
+    """Parted slats + bite gap + wire pins, drawn over the ribbed front panel.
+
+    The panel it overlays is x 8..56, y 49..68 with dark rib lines at y 55.5
+    and 62.5 (see chest_svg). Only x 20..44 is repainted.
+    """
+    cx, cy = BITE_CENTER
+    rx, ry = BITE_RADIUS_X, BITE_RADIUS_Y
+    left, right = 20, 44
+    # Rib lines bow away from the gap; a quadratic's apex sits at
+    # 0.25*P0 + 0.5*P1 + 0.25*P2, so control y = apex - (base - apex).
+    upper_apex = cy - ry - 0.5
+    lower_apex = cy + ry + 0.5
+    upper_control = 2 * upper_apex - 55.5
+    lower_control = 2 * lower_apex - 62.5
+    upper_rib = f"M{left} 55.5 L{cx - rx - 2} 55.5 Q{cx} {upper_control} {cx + rx + 2} 55.5 L{right} 55.5"
+    lower_rib = f"M{left} 62.5 L{cx - rx - 2} 62.5 Q{cx} {lower_control} {cx + rx + 2} 62.5 L{right} 62.5"
+    upper_lit = f"M{left} 56.5 L{cx - rx - 2} 56.5 Q{cx} {upper_control + 1} {cx + rx + 2} 56.5 L{right} 56.5"
+    lower_lit = f"M{left} 63.5 L{cx - rx - 2} 63.5 Q{cx} {lower_control + 1} {cx + rx + 2} 63.5 L{right} 63.5"
+
+    # Teeth: small wedges pointing into the gap from its top and bottom edges.
+    teeth = []
+    for i in range(-2, 3):
+        tx = cx + i * 3.0
+        h = 1.6 if i != 0 else 1.2
+        teeth.append(f'<path d="M{tx - 1.1} {cy - ry + 0.3} L{tx + 1.1} {cy - ry + 0.3} L{tx} {cy - ry + 0.3 + h} Z"/>')
+        teeth.append(f'<path d="M{tx - 1.1} {cy + ry - 0.3} L{tx + 1.1} {cy + ry - 0.3} L{tx} {cy + ry - 0.3 - h} Z"/>')
+    teeth_svg = "\n    ".join(teeth)
+
+    def pin(x: float, y: float) -> str:
+        return f"""
+    <circle cx="{x}" cy="{y}" r="2.1" fill="{STEEL_EDGE}"/>
+    <circle cx="{x}" cy="{y}" r="1.5" fill="url(#brass)"/>
+    <circle cx="{x - 0.4}" cy="{y - 0.4}" r="0.6" fill="{BRASS_LIGHT}"/>"""
+
+    return svg_open(64, 80, "0 0 64 80") + f"""
+  <!-- repaint the panel strip so the straight rib lines vanish under the bite -->
+  <rect x="{left}" y="49" width="{right - left}" height="19" fill="url(#front)"/>
+
+  <!-- ribs bowing around the gap -->
+  <g fill="none" stroke="{STEEL_EDGE}" stroke-width="1.2">
+    <path d="{upper_rib}"/>
+    <path d="{lower_rib}"/>
+  </g>
+  <g fill="none" stroke="#ffffff" stroke-width="1" opacity="0.16">
+    <path d="{upper_lit}"/>
+    <path d="{lower_lit}"/>
+  </g>
+
+  <!-- the bite gap: dark opening with a lit upper lip -->
+  <ellipse cx="{cx}" cy="{cy}" rx="{rx + 0.8}" ry="{ry + 0.8}" fill="{STEEL_EDGE}"/>
+  <ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" fill="url(#intake)"/>
+  <path d="M{cx - rx} {cy} A{rx} {ry} 0 0 1 {cx + rx} {cy}" fill="none" stroke="#ffffff" stroke-opacity="0.22" stroke-width="0.8"/>
+
+  <!-- teeth -->
+  <g fill="{STEEL_TOP_LIGHT}" stroke="{STEEL_EDGE}" stroke-width="0.35">
+    {teeth_svg}
+  </g>
+
+  <!-- wire pins the red / green wires terminate on -->
+  {pin(*WIRE_PIN_RED)}
+  {pin(*WIRE_PIN_GREEN)}
+</svg>
+"""
+
+
+def led_svg(x: float, y: float, colour: str) -> str:
+    """A small glow around a wire pin, drawn as a draw_as_glow LED sprite."""
+    return svg_open(64, 80, "0 0 64 80") + f"""
+  <radialGradient id="led" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="0.75"/>
+    <stop offset="0.35" stop-color="{colour}" stop-opacity="0.7"/>
+    <stop offset="1" stop-color="{colour}" stop-opacity="0"/>
+  </radialGradient>
+  <circle cx="{x}" cy="{y}" r="2.6" fill="url(#led)"/>
+</svg>
+"""
+
+
 def render_svg(svg: str, width: int, height: int, supersample: int = 4) -> Image.Image:
     """Rasterise at `supersample`x and box-downscale for smooth edges."""
     png = cairosvg.svg2png(
@@ -233,6 +341,35 @@ def build_entity() -> Image.Image:
     return grunge(sprite)
 
 
+def build_connector() -> Image.Image:
+    """Same canvas + same grunge seed as the entity, so overlay metal matches."""
+    return grunge(render_svg(connector_svg(), 64, 80))
+
+
+def build_connector_led(colour: str) -> Image.Image:
+    x, y = WIRE_PIN_RED if colour == "red" else WIRE_PIN_GREEN
+    return render_svg(led_svg(x, y, LED_RED if colour == "red" else LED_GREEN), 64, 80)
+
+
+def build_connector_preview(entity: Image.Image, connector: Image.Image, leds: list[Image.Image], zoom: int = 8) -> Image.Image:
+    """Entity + overlay + fake wires, zoomed, for eyeballing the wired look."""
+    frame = Image.new("RGBA", (64 * 3, 80 * 2), (96, 72, 48, 255))
+    plain = frame.copy()
+    plain.alpha_composite(entity, (64, 40))
+    wired = frame.copy()
+    wired.alpha_composite(entity, (64, 40))
+    wired.alpha_composite(connector, (64, 40))
+    for led in leds:
+        wired.alpha_composite(led, (64, 40))
+    draw = ImageDraw.Draw(wired)
+    for (px, py), colour in ((WIRE_PIN_RED, (232, 48, 40)), (WIRE_PIN_GREEN, (54, 200, 70))):
+        draw.line((0, 30, 64 + px, 40 + py), fill=colour, width=1)
+    sheet = Image.new("RGBA", (frame.width * 2, frame.height), (0, 0, 0, 255))
+    sheet.alpha_composite(plain, (0, 0))
+    sheet.alpha_composite(wired, (frame.width, 0))
+    return sheet.resize((sheet.width * zoom, sheet.height * zoom), Image.NEAREST)
+
+
 def build_shadow() -> Image.Image:
     """Opaque black footprint; the engine tints/blends draw_as_shadow layers."""
     shadow = Image.new("RGBA", (110, 46), (0, 0, 0, 0))
@@ -266,20 +403,35 @@ def build_thumbnail(icon_sheet: Image.Image) -> Image.Image:
     return icon_sheet.crop((0, 0, 64, 64)).resize((256, 256), Image.NEAREST)
 
 
-def main() -> None:
+def main(preview_dir: Path | None) -> None:
     (HERE / "entity").mkdir(exist_ok=True)
     (HERE / "icons").mkdir(exist_ok=True)
-    build_entity().save(HERE / "entity" / "auto-loader-chest.png")
+    entity = build_entity()
+    entity.save(HERE / "entity" / "auto-loader-chest.png")
     build_shadow().save(HERE / "entity" / "auto-loader-chest-shadow.png")
+    connector = build_connector()
+    connector.save(HERE / "entity" / "auto-loader-chest-connector.png")
+    leds = [build_connector_led("red"), build_connector_led("green")]
+    leds[0].save(HERE / "entity" / "auto-loader-chest-connector-led-red.png")
+    leds[1].save(HERE / "entity" / "auto-loader-chest-connector-led-green.png")
     icon_sheet = build_icon()
     icon_sheet.save(HERE / "icons" / "auto-loader-chest.png")
     build_thumbnail(icon_sheet).save(HERE.parent / "thumbnail.png")
     print(
         "wrote entity/auto-loader-chest.png, entity/auto-loader-chest-shadow.png,"
-        " icons/auto-loader-chest.png, ../thumbnail.png"
+        " entity/auto-loader-chest-connector*.png, icons/auto-loader-chest.png, ../thumbnail.png"
     )
+    if preview_dir:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        build_connector_preview(entity, connector, leds).save(preview_dir / "connector-preview.png")
+        print(f"wrote {preview_dir / 'connector-preview.png'}")
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--preview", metavar="DIR", type=Path, help="also write a zoomed plain-vs-wired comparison PNG to DIR")
+    arguments = parser.parse_args()
     os.chdir(HERE)
-    main()
+    main(arguments.preview)
