@@ -2,7 +2,7 @@
 Version: 1.1.4
 Date: 2026-08-18
   Graphics:
-    - The Auto-Loader chest has its own circuit connector: when a wire is attached, a small terminal socket with two copper leads appears in the front panel and the wire ends there, instead of the stock chest connector box.
+    - Auto-Loader chest has its own circuit connector image now.
 ---------------------------------------------------------------------------------------------------
 Version: 1.1.3
 Date: 2026-08-17
