@@ -117,6 +117,12 @@ alert_when_attacking - if we could intercept that'd be ideal
 lua control - in_combat
 
 
+## Testing and performance
+
+See [Benchmarking refill changes inside Factorio](tests/BENCHMARKING.md) for a
+reproducible map and entity fixture, real inventory profiling, correctness
+checks, and whole-save UPS comparisons.
+
 ## Install
 
 Drop the mod folder into your Factorio `mods/` directory:
