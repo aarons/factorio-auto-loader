@@ -4,7 +4,7 @@
   "factorio_version": "2.1",
   "title": "Auto-Loader",
   "author": "raley",
-  "description": "Inspired by the ammo-loader+ mod. Will automatically fill turrets with ammo and fuel burners with fuel from a chest. Works with quality ammo and fuel, has shared storage per surface, and works in spaaaaace.",
+  "description": "This chest automatically refills turrets and fuel-burners on the map. It was inspired by ammo-loader+ but works with quality items, has shared storage per surface, and works in spaaaaace.",
   "dependencies": [
     "base",
     "? space-age"
