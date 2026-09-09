@@ -23,10 +23,14 @@ inserts happen, and written back with a single `remove` at tick end.
 
 Fill rules: skip anything marked for deconstruction; never fill another force's
 entities; locomotives only get their first fuel slot; characters only get ammo
-for categories of a currently-equipped gun — and once the force unlocks
-logistic requests, only ammo the player actively requests (no ammo request, or
-paused personal logistics, means no character refill; pre-unlock characters are
-filled freely); ammo is capped at the turret's `automated_ammo_count` (default
+for categories of a currently-equipped gun. When an ammo slot is empty and the
+player holds ammo in their hand, that slot waits before refilling so the gun can
+be removed. **Player ammo refill delay (seconds)** is a per-player setting with a
+default of 10 seconds (0 disables the delay). Holding ammo keeps postponing
+refills; empty slots refill after you put it away and the delay expires.
+Occupied ammo slots keep topping up normally. Personal logistic requests and
+logistics research do not affect player ammo refills;
+ammo is capped at the turret's `automated_ammo_count` (default
 10) so nothing drains the pool. Quality is respected — items are inserted at
 the quality the pool holds and only where the entity accepts them.
 

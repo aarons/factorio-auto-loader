@@ -40,4 +40,13 @@ data:extend({
     maximum_value = 10000,
     order = "a",
   },
+  {
+    type = "int-setting",
+    name = "auto-loader-player-ammo-refill-delay",
+    setting_type = "runtime-per-user",
+    default_value = 10,
+    minimum_value = 0,
+    maximum_value = 3600,
+    order = "a",
+  },
 })

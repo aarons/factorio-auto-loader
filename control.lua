@@ -10,6 +10,7 @@
 -- swap-popping it
 local CHEST = "auto-loader-chest"
 local ENTITIES_PER_TICK_SETTING = "auto-loader-entities-per-tick"
+local AMMO_REFILL_DELAY_SETTING = "auto-loader-player-ammo-refill-delay"
 
 -- Ammo target when the prototype gives no automated_ammo_count (vehicles,
 -- characters). Caps how much ammo we keep stocked so a single entity can't drain
@@ -251,37 +252,13 @@ end
 -- Filling.
 ----------------------------------------------------------------------
 
--- Once the force unlocks logistic requests, the player's request list becomes
--- the source of truth for character ammo: returns the set of requested ammo
--- item names (empty when personal logistics are paused or no ammo is
--- requested), so clearing the request lets a player unload their ammo — e.g.
--- before boarding a space platform — without the mod instantly refilling it.
--- Returns nil while requests are still locked, so early-game characters keep
--- getting filled unconditionally.
-local function character_requested_ammo(entity)
-  if not entity.force.character_logistic_requests then return nil end
-  local point = entity.get_requester_point()
-  if not point then return nil end
-  local requested_item_names = {}
-  if point.enabled then
-    for _, request_filter in ipairs(point.filters or {}) do
-      -- Matched by name across qualities: a request for an ammo item at any
-      -- quality keeps every quality of it flowing from the pool.
-      if request_filter.name and ITEM_AMMO[request_filter.name] and (request_filter.count or 0) > 0 then
-        requested_item_names[request_filter.name] = true
-      end
-    end
-  end
-  return requested_item_names
-end
-
 -- Occupied slots only accept their exact item/quality. Empty slots additionally
 -- validate their filters before removing anything from supply.
-local function fill_slot(slot, accepted_categories, requested_item_names, target_count, pool, candidate_kind, item_categories)
+local function fill_slot(slot, accepted_categories, target_count, pool, candidate_kind, item_categories)
   if not slot then return end
   if slot.valid_for_read then
     local name = slot.name
-    if not accepted_categories[item_categories[name]] or (requested_item_names and not requested_item_names[name]) then return end
+    if not accepted_categories[item_categories[name]] then return end
     local gap = math.min(target_count, prototypes.item[name].stack_size) - slot.count
     if gap <= 0 then return end
     local removed = pool.inventory.remove{ name = name, quality = slot.quality.name, count = gap }
@@ -289,7 +266,7 @@ local function fill_slot(slot, accepted_categories, requested_item_names, target
     return -- another item cannot go into this occupied slot
   end
   try_candidates(pool, candidate_kind, function(item)
-    if not accepted_categories[item.category] or (requested_item_names and not requested_item_names[item.name]) then return 0 end
+    if not accepted_categories[item.category] then return 0 end
     local request = {
       name = item.name, quality = item.quality,
       count = math.min(target_count, prototypes.item[item.name].stack_size),
@@ -310,18 +287,28 @@ local function fill_character_ammo(entry, entity, pool)
   local guns = entity.get_inventory(defines.inventory.character_guns)
   local inventory = entity.get_inventory(entry.ammo_define)
   if not (guns and inventory) then return end
-  local requested_item_names = character_requested_ammo(entity)
+  local player = entity.player
+  local cursor = player and player.cursor_stack
+  local holding_ammo = cursor and cursor.valid_for_read and ITEM_AMMO[cursor.name]
+  local delay_setting = player and player.mod_settings[AMMO_REFILL_DELAY_SETTING]
+  local delay_ticks = (delay_setting and delay_setting.value or 10) * 60
 
   local slots = #guns < #inventory and #guns or #inventory
   for slot_index = 1, slots do
     local gun = guns[slot_index]
-    if gun.valid_for_read then
+    local slot = inventory[slot_index]
+    -- Holding ammo postpones refilling empty slots so the player can remove guns.
+    if gun.valid_for_read and not slot.valid_for_read and holding_ammo then
+      entry.ammo_refill_after = game.tick + delay_ticks
+    end
+    local delayed = entry.ammo_refill_after and game.tick < entry.ammo_refill_after
+    if gun.valid_for_read and (slot.valid_for_read or not delayed) then
       local attack_parameters = gun.prototype.attack_parameters
       local accepted_categories = attack_parameters and attack_parameters.ammo_categories
       if accepted_categories then
         local accepted = {}
         for _, category in ipairs(accepted_categories) do accepted[category] = true end
-        fill_slot(inventory[slot_index], accepted, requested_item_names, entry.ammo_target, pool, "ammos", ITEM_AMMO)
+        fill_slot(slot, accepted, entry.ammo_target, pool, "ammos", ITEM_AMMO)
       end
     end
   end
@@ -372,7 +359,7 @@ local function fill_fuel(entry, entity, pool)
   if not (inventory and accepted_categories) then return end
   if entry.is_locomotive then
     -- Trains keep one full stack, without hoarding across all three slots.
-    fill_slot(inventory[1], accepted_categories, nil, math.huge, pool, "fuels", ITEM_FUEL)
+    fill_slot(inventory[1], accepted_categories, math.huge, pool, "fuels", ITEM_FUEL)
   else
     fill_inventory(inventory, FUEL_TARGET, pool, "fuels", ITEM_FUEL, accepted_categories)
   end

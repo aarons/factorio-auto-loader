@@ -380,7 +380,7 @@ Useful extensions are independent dimensions, not substitutes for one another:
 - **Supply shape:** one item, many item/quality identities, different slot counts,
   depleted candidates, and incompatible categories or filters.
 - **Consumer types:** burners, locomotives, characters with paired guns and
-  requests, artillery, and vehicles. This turret fixture does not cover them.
+  manual ammo removal delays, artillery, and vehicles. This turret fixture does not cover them.
 - **Distribution:** multiple surfaces and forces, missing chests, destroyed
   representative chests, and changing supply.
 - **Transfer correctness:** partial insertion, refunds, exact quality, slot

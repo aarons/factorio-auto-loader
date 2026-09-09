@@ -1,6 +1,6 @@
 -- Run from the repository root: lua tests/supply.lua
 -- Exercise the real transfer functions with inventories that track API calls.
-defines = { inventory = {}, events = {} }
+defines = { inventory = { character_guns = 1, character_ammo = 2 }, events = {} }
 script = { on_init = function() end, on_configuration_changed = function() end,
   on_load = function() end, on_event = function() end }
 storage = { representative_chests = {}, supply_candidates = {} }
@@ -13,7 +13,7 @@ local source = file:read('*a'); file:close()
 local supply_functions = assert(load(source .. [[
 ITEM_AMMO.bullet, ITEM_AMMO.piercing, ITEM_AMMO.shell = 'bullet', 'bullet', 'shotgun'
 ITEM_FUEL.coal = 'chemical'
-return { fill_inventory = fill_inventory, fill_slot = fill_slot, get_pool = get_pool }
+return { fill_inventory = fill_inventory, fill_slot = fill_slot, get_pool = get_pool, fill_character_ammo = fill_character_ammo }
 ]]))()
 local ammo = { bullet = 'bullet', piercing = 'bullet', shell = 'shotgun' }
 local function assert_equal(actual, expected)
@@ -118,20 +118,18 @@ supply_pool.chest = { position = {0, 0}, force = {}, surface = {
 item_stack = slot('bullet', 1)
 fill(supply_pool, destination(item_stack, 100, 2)); assert_equal(item_stack.count, 3); assert_equal(spilled, 7)
 
--- Character compatibility, filters, requests, and quality stay slot-specific.
+-- Character compatibility, filters and quality stay slot-specific.
 supply_pool = pool({ ['bullet/normal'] = 20, ['shell/rare'] = 20 })
 item_stack = slot(nil, nil, nil, 'shell')
-supply_functions.fill_slot(item_stack, {bullet=true}, nil, 10, supply_pool, 'ammos', ammo)
+supply_functions.fill_slot(item_stack, {bullet=true}, 10, supply_pool, 'ammos', ammo)
 assert_equal(item_stack.valid_for_read, false)
-supply_functions.fill_slot(item_stack, {shotgun=true}, {}, 10, supply_pool, 'ammos', ammo)
-assert_equal(item_stack.valid_for_read, false)
-supply_functions.fill_slot(item_stack, {shotgun=true}, {shell=true}, 10, supply_pool, 'ammos', ammo)
+supply_functions.fill_slot(item_stack, {shotgun=true}, 10, supply_pool, 'ammos', ammo)
 assert_equal(item_stack.name, 'shell'); assert_equal(item_stack.quality.name, 'rare'); assert_equal(item_stack.count, 10); assert_equal(supply_pool.inventory.reads, 1)
 
 -- Locomotive single-slot policy retains a full stack target and partial fills.
 supply_pool = pool({ ['coal/normal'] = 70 })
 item_stack = slot()
-supply_functions.fill_slot(item_stack, {chemical=true}, nil, math.huge, supply_pool, 'fuels', {coal='chemical'})
+supply_functions.fill_slot(item_stack, {chemical=true}, math.huge, supply_pool, 'fuels', {coal='chemical'})
 assert_equal(item_stack.count, 50)
 
 -- Surface/force handles cannot select another force's linked inventory.
@@ -156,3 +154,68 @@ chests[1].valid = false
 chests[1] = nil
 assert_equal(supply_functions.get_pool(1, force1, {}), nil)
 print('Supply regression checks passed')
+
+
+-- Player debounce uses real character fill logic and a simulated game clock.
+local function character(delay)
+  local guns = {
+    {valid_for_read=true, prototype={attack_parameters={ammo_categories={'bullet'}}}},
+    {valid_for_read=true, prototype={attack_parameters={ammo_categories={'bullet'}}}},
+  }
+  local inventory = {slot(), slot('bullet', 1)}
+  local player = {cursor_stack=slot('bullet', 10), mod_settings={
+    ['auto-loader-player-ammo-refill-delay']={value=delay},
+  }}
+  local entity = {player=player, unit_number=123,
+    force={character_logistic_requests=true},
+    get_requester_point=function() error('Logistics must not be consulted') end,
+    get_inventory=function(id) return id == defines.inventory.character_guns and guns or inventory end,
+  }
+  player.character = entity
+  local entry = {ammo_define=defines.inventory.character_ammo, ammo_target=10}
+  local supply_pool = pool({['bullet/normal']=100})
+  local function refill(tick)
+    game.tick = tick
+    supply_functions.fill_character_ammo(entry, entity, supply_pool)
+  end
+  return entry, player, guns, inventory, refill
+end
+local entry, player, guns, inventory, refill = character(10)
+refill(0)
+assert_equal(inventory[1].valid_for_read, false)
+assert_equal(inventory[2].count, 10) -- other occupied slots still top up
+refill(600); assert_equal(inventory[1].valid_for_read, false)
+refill(6000); assert_equal(inventory[1].valid_for_read, false) -- held indefinitely
+player.cursor_stack = slot()
+refill(6599); assert_equal(inventory[1].valid_for_read, false)
+refill(6600); assert_equal(inventory[1].count, 10)
+inventory[1] = slot(); refill(6601) -- normal consumption refills immediately
+assert_equal(inventory[1].count, 10)
+
+-- All empty slots share the delay; a new pickup extends it.
+entry, player, guns, inventory, refill = character(2)
+refill(2000)
+player.cursor_stack = slot()
+inventory[2] = slot()
+refill(2119)
+assert_equal(inventory[1].valid_for_read, false)
+assert_equal(inventory[2].valid_for_read, false)
+player.cursor_stack = slot('bullet', 10)
+refill(2120)
+player.cursor_stack = slot()
+refill(2239); assert_equal(inventory[1].valid_for_read, false)
+refill(2240)
+assert_equal(inventory[1].count, 10)
+assert_equal(inventory[2].count, 10)
+-- Removing the gun keeps its slot empty after the delay.
+inventory[1] = slot(); player.cursor_stack = slot('bullet', 10); refill(2300)
+guns[1].valid_for_read = false
+player.cursor_stack = slot()
+refill(2500); assert_equal(inventory[1].valid_for_read, false)
+
+entry, player, guns, inventory, refill = character(0)
+refill(0); assert_equal(inventory[1].count, 10)
+entry, player, guns, inventory, refill = character(10)
+player.cursor_stack = slot('coal', 10)
+refill(0); assert_equal(inventory[1].count, 10)
+print('Player ammo regression checks passed')
