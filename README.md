@@ -123,7 +123,10 @@ lua control - in_combat
 
 ## Testing and performance
 
-See [Benchmarking refill changes inside Factorio](tests/BENCHMARKING.md) for a
+See [Automated tests](documentation/TESTING.md) for Lua regression checks and
+the executable-backed player ammo test.
+
+See [Benchmarking refill changes inside Factorio](documentation/BENCHMARKING.md) for a
 reproducible map and entity fixture, real inventory profiling, correctness
 checks, and whole-save UPS comparisons.
 

@@ -9,7 +9,7 @@ Evaluate if we need tests for (do not implement these yet):
 - [ ] Use the correct supply after a consumer changes surface or force.
 - [ ] Fill only the first locomotive fuel slot according to its special refill rule.
 - [ ] Refill character ammo slots independently according to their paired guns.
-- [ ] Respect character logistics requests, research, and paused logistics.
+- [x] Delay player ammo refills while ammo is held, refill after it is put away, and leave unarmed slots empty ([automated test](../documentation/TESTING.md)).
 - [ ] Pause refilling for deconstruction and resume when it is cancelled.
 - [ ] Register consumers built by players, robots, scripts, and space platforms, including revived entities.
 - [ ] Handle cloned entities and imported surfaces without duplicate registration.
