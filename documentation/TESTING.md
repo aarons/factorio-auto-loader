@@ -4,7 +4,32 @@ Run the fast Lua regression checks from the repository root:
 
 ```sh
 lua tests/supply.lua
+python3 -B tests/factorio_discovery.py
 ```
+
+These exercise the production tick and refill functions with instrumented
+inventories. They check lazy supply access (including delayed/unarmed character
+slots), one snapshot per surface/force per tick, batched debits, conservation,
+shortages/restocking, exact quality and existing-stack preference, rejected and
+partial insertion/slot placement, locomotive slot limits, changing forces and
+surfaces, missing/replaced chests, and cleanup of the old supply cache on upgrade.
+The mocks deliberately reject refunds and simulate partial API acceptance.
+The Python check verifies that both runners prefer standalone macOS Factorio
+over a `PATH` copy, honor explicit overrides, and handle missing installations.
+
+## Supply integration test
+
+```sh
+python3 tests/run_factorio.py --test supply
+```
+
+This runs three advancing ticks after saving and reloading the working mod in
+Factorio. It validates four independent pools across two surfaces and two
+forces, linked-chest replacement, normal/rare ammo, shortages, a force without
+a chest, a filtered character slot, and a turret rejecting incompatible ammo.
+A fixture turret requests 120 magazines but can hold only 100; exactly 100 must
+be debited from its barred supply chest. Assertions run after each production
+tick. This test needs no graphical desktop or player.
 
 ## Player ammo integration test
 
@@ -12,8 +37,12 @@ lua tests/supply.lua
 python3 tests/run_factorio.py
 ```
 
-The runner finds Factorio on `PATH` or in the usual macOS Steam/Applications
-locations. To select an installation explicitly:
+Both test and benchmark runners prefer the standalone macOS installation at
+`/Applications/factorio.app/Contents/MacOS/factorio`, then fall back to `PATH`.
+They do not automatically search the Steam installation. An explicit
+`--factorio` or `AUTO_FACTORIO` takes precedence over discovery. The data
+directory is discovered relative to the selected executable unless overridden.
+To select an installation explicitly:
 
 ```sh
 python3 tests/run_factorio.py --factorio /path/to/factorio --data /path/to/data

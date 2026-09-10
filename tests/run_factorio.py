@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the player ammo integration test in an isolated Factorio installation."""
+"""Run integration tests against the working mod in an isolated Factorio directory."""
 import argparse
 import json
 import os
@@ -14,21 +14,24 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 
 
+def find_factorio(explicit=None):
+    # Prefer standalone macOS Factorio even when PATH contains a Steam copy.
+    candidates = [explicit] if explicit else [
+        '/Applications/factorio.app/Contents/MacOS/factorio', shutil.which('factorio')]
+    return next((Path(p).resolve() for p in candidates if p and Path(p).is_file()), None)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--test', choices=['player_ammo','supply'], default='player_ammo')
     parser.add_argument('--factorio', default=os.environ.get('AUTO_FACTORIO'),
-                        help='Factorio executable (or AUTO_FACTORIO)')
+                        help='Executable (default: /Applications/factorio.app, then PATH; AUTO_FACTORIO overrides)')
     parser.add_argument('--data', default=os.environ.get('AUTO_FACTORIO_DATA'),
                         help='Factorio data directory (or AUTO_FACTORIO_DATA)')
     parser.add_argument('--timeout', type=float, default=120,
                         help='Timeout in seconds per launch (default: 120)')
     args = parser.parse_args()
-    candidates = [args.factorio] if args.factorio else [
-        shutil.which('factorio'),
-        str(Path.home() / 'Library/Application Support/Steam/steamapps/common/Factorio/factorio.app/Contents/MacOS/factorio'),
-        '/Applications/factorio.app/Contents/MacOS/factorio',
-    ]
-    executable = next((Path(p).resolve() for p in candidates if p and Path(p).is_file()), None)
+    executable = find_factorio(args.factorio)
     if not executable:
         parser.error('Factorio not found; pass --factorio or set AUTO_FACTORIO')
     data_candidates = [executable.parent.parent / 'data', executable.parent.parent.parent / 'data']
@@ -54,9 +57,17 @@ def main():
         'author': 'Auto-Loader', 'factorio_version': info['factorio_version'],
         'dependencies': [info['name']],
     }))
-    shutil.copy2(REPO / 'tests/factorio/player_ammo.lua', fixture / 'control.lua')
+    shutil.copy2(REPO / 'tests/factorio' / f'{args.test}.lua', fixture / 'control.lua')
     (fixture / 'settings-final-fixes.lua').write_text(
-        "data.raw['int-setting']['auto-loader-player-ammo-refill-delay'].default_value = 1\n")
+        "data.raw['int-setting']['auto-loader-player-ammo-refill-delay'].default_value = 1\n"
+        + ("data.raw['int-setting']['auto-loader-entities-per-tick'].default_value = 100\n"
+           if args.test == 'supply' else ''))
+    if args.test == 'supply':
+        (fixture / 'data-final-fixes.lua').write_text(
+            "local turret = table.deepcopy(data.raw['ammo-turret']['gun-turret'])\n"
+            "turret.name = 'auto-loader-test-turret'\n"
+            "turret.automated_ammo_count = 120\n"
+            "data:extend{turret}\n")
     builtins = sorted(json.loads(p.read_text())['name']
                       for p in data.glob('*/info.json') if p.parent.name != 'core')
     (root / 'mods/mod-list.json').write_text(json.dumps({
@@ -72,6 +83,16 @@ def main():
     with (root / 'create.log').open('w') as output:
         subprocess.run(command + ['--create', str(root / 'test.zip')],
                        stdout=output, stderr=subprocess.STDOUT, check=True, timeout=args.timeout)
+    if args.test == 'supply':
+        with (root / 'test.log').open('w') as output:
+            subprocess.run(command + ['--benchmark',str(root/'test.zip'),
+                '--benchmark-ticks','3','--benchmark-runs','1'], stdout=output,
+                stderr=subprocess.STDOUT, check=True, timeout=args.timeout)
+        log = (root/'test.log').read_text()
+        if 'AUTO_LOADER_TEST SUCCESS' not in log:
+            raise RuntimeError(f'Factorio supply test incomplete; inspect {root}/test.log')
+        print('\n'.join(line for line in log.splitlines() if 'AUTO_LOADER_TEST' in line))
+        return 0
     # Loading a single-player game creates the real LuaPlayer needed for cursor_stack.
     with (root / 'test.log').open('w') as output:
         process = subprocess.Popen(command + [
@@ -87,7 +108,8 @@ def main():
                     print('\n'.join(line for line in log.splitlines() if 'AUTO_LOADER_TEST' in line))
                     return 0
                 if ('AUTO_LOADER_TEST FAIL:' in log or 'Error while running' in log
-                        or 'Received SIG' in log or process.poll() is not None):
+                        or 'Received SIG' in log or 'Factorio crashed' in log
+                        or process.poll() is not None):
                     raise RuntimeError(f'Factorio test failed; inspect {root}/test.log')
                 time.sleep(0.1)
             raise RuntimeError(f'Factorio test timed out; inspect {root}/test.log')

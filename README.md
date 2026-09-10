@@ -17,9 +17,12 @@ artillery, vehicles, characters, and any burner) is built from the build/clone
 events plus an initial surface scan, with `register_on_object_destroyed` as the
 removal backstop. Each tick a bounded round-robin sweep processes K entities
 (the `auto-loader-entities-per-tick` runtime setting, default 10), advancing a
-persistent cursor so cost is constant regardless of how many entities exist. For
-each surface touched in a tick the pool is read once, decremented locally as
-inserts happen, and written back with a single `remove` at tick end.
+persistent cursor. Supply is read only when a consumer needs a refill, once per
+surface/force pool per tick. A Lua ledger tracks the remaining supply through
+the sweep; each consumed item/quality is removed from the chest in one batch at
+tick end. Only items actually accepted by an inventory or slot are charged, so
+rejected and partial refills leave the unused supply in the chest. Supply
+identities and counts are never cached across ticks.
 
 Fill rules: skip anything marked for deconstruction; never fill another force's
 entities; locomotives only get their first fuel slot; characters only get ammo
@@ -129,6 +132,8 @@ the executable-backed player ammo test.
 See [Benchmarking refill changes inside Factorio](documentation/BENCHMARKING.md) for a
 reproducible map and entity fixture, real inventory profiling, correctness
 checks, and whole-save UPS comparisons.
+The [ledger benchmark report](documentation/BENCHMARK_RESULTS_2026-09-09_LEDGER.md)
+compares the current engine with both prior refill approaches.
 
 ## Install
 

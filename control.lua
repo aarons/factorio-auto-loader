@@ -143,7 +143,7 @@ local function on_object_destroyed(event)
 end
 
 ----------------------------------------------------------------------
--- Pool access: persistent candidates, lazy discovery, immediate transfers.
+-- Pool access: demand-driven per-tick ledgers, with debits after the sweep.
 ----------------------------------------------------------------------
 
 local function representative_chest(surface_index, force)
@@ -171,80 +171,53 @@ local function get_pool(surface_index, force, pools)
   local inventory = chest and chest.get_inventory(defines.inventory.chest)
   if not inventory then pools[surface_index][force_index] = false; return nil end
 
-  -- Persist candidate identities for save/load and multiplayer consistency.
-  -- No quantities are retained; remove() is always the source of truth.
-  local candidates = storage.supply_candidates
-  candidates[surface_index] = candidates[surface_index] or {}
-  candidates[surface_index][force_index] = candidates[surface_index][force_index] or { fuels = {}, ammos = {} }
-  local pool = { inventory = inventory, chest = chest, candidates = candidates[surface_index][force_index] }
+  local pool = { inventory = inventory, available = {}, items = {}, fuels = {}, ammos = {} }
+  for _, contents in pairs(inventory.get_contents()) do
+    local name, quality = contents.name, contents.quality
+    if ITEM_FUEL[name] or ITEM_AMMO[name] then
+      if type(quality) ~= "string" then quality = quality.name end
+      local item = { name = name, quality = quality, count = contents.count, consumed = 0 }
+      pool.available[name] = pool.available[name] or {}
+      pool.available[name][quality] = item
+      pool.items[#pool.items + 1] = item
+      if ITEM_FUEL[name] then pool.fuels[#pool.fuels + 1] = item end
+      if ITEM_AMMO[name] then pool.ammos[#pool.ammos + 1] = item end
+    end
+  end
   pools[surface_index][force_index] = pool
   return pool
 end
 
-local function discover(pool)
-  if pool.discovered then return false end
-  pool.discovered = true -- includes empty or incompatible supply for this tick
-  local candidates = { fuels = {}, ammos = {} }
-  for _, item in pairs(pool.inventory.get_contents()) do
-    local name, quality = item.name, item.quality
-    if type(quality) ~= "string" then quality = quality.name end
-    local fuel_category, ammo_category = ITEM_FUEL[name], ITEM_AMMO[name]
-    if fuel_category then
-      candidates.fuels[#candidates.fuels + 1] = { name = name, quality = quality, category = fuel_category }
-    end
-    if ammo_category then
-      candidates.ammos[#candidates.ammos + 1] = { name = name, quality = quality, category = ammo_category }
-    end
-  end
-  pool.candidates.fuels = candidates.fuels
-  pool.candidates.ammos = candidates.ammos
-  return true
+local function pool_item(pool, name, quality)
+  local qualities = pool.available[name]
+  return qualities and qualities[quality]
 end
 
--- Try each identity once per consumer, even if discovery finds it again.
--- Compatibility failures must not evict candidates needed by other consumers.
-local function try_candidates(pool, candidate_kind, attempt_transfer, attempted_candidates)
-  attempted_candidates = attempted_candidates or {}
-  local function try_cached()
-    for _, item in ipairs(pool.candidates[candidate_kind]) do
-      local key = item.name .. "/" .. item.quality
-      if not attempted_candidates[key] then
-        attempted_candidates[key] = true
-        if attempt_transfer(item) > 0 then return true end
+local function consume(item, count)
+  item.count = item.count - count
+  item.consumed = item.consumed + count
+end
+
+local function debit_pools(pools)
+  -- No other event handler runs between our snapshot and these debits.
+  for _, forces in pairs(pools) do
+    for _, pool in pairs(forces) do
+      if pool then
+        for _, item in ipairs(pool.items) do
+          if item.consumed > 0 then
+            pool.inventory.remove{ name = item.name, quality = item.quality, count = item.consumed }
+          end
+        end
       end
     end
-    return false
-  end
-  if try_cached() then return end
-  if discover(pool) then try_cached() end
-end
-
--- A supply bar/filter can prevent reinsertion into the space removal freed.
--- Preserve any rejected refund at the representative chest instead of losing it.
-local function refund(pool, request)
-  local returned = pool.inventory.insert(request)
-  if returned < request.count then
-    request.count = request.count - returned
-    local chest = pool.chest
-    chest.surface.spill_item_stack{
-      position = chest.position, stack = request, enable_looted = true,
-      force = chest.force, allow_belts = false, use_start_position_on_failure = true,
-    }
   end
 end
 
-local function transfer_inventory(pool, inventory, item, desired_count)
-  local request = { name = item.name, quality = item.quality }
-  request.count = math.min(desired_count, inventory.get_insertable_count(request))
-  if request.count <= 0 then return 0 end
-  local removed = pool.inventory.remove(request)
-  if removed == 0 then return 0 end
-  request.count = removed
-  local inserted = inventory.insert(request)
-  if inserted < removed then
-    request.count = removed - inserted
-    refund(pool, request)
-  end
+local function transfer_inventory(inventory, item, desired_count)
+  local inserted = inventory.insert{
+    name = item.name, quality = item.quality, count = math.min(desired_count, item.count),
+  }
+  consume(item, inserted)
   return inserted
 end
 
@@ -254,36 +227,41 @@ end
 
 -- Occupied slots only accept their exact item/quality. Empty slots additionally
 -- validate their filters before removing anything from supply.
-local function fill_slot(slot, accepted_categories, target_count, pool, candidate_kind, item_categories)
+local function fill_slot(slot, accepted_categories, target_count, entity, pools, item_kind, item_categories)
   if not slot then return end
   if slot.valid_for_read then
     local name = slot.name
     if not accepted_categories[item_categories[name]] then return end
     local gap = math.min(target_count, prototypes.item[name].stack_size) - slot.count
     if gap <= 0 then return end
-    local removed = pool.inventory.remove{ name = name, quality = slot.quality.name, count = gap }
-    if removed > 0 then slot.count = slot.count + removed end
+    local pool = get_pool(entity.surface.index, entity.force, pools)
+    local item = pool and pool_item(pool, name, slot.quality.name)
+    if item and item.count > 0 then
+      local before = slot.count
+      slot.count = before + math.min(gap, item.count)
+      consume(item, slot.count - before)
+    end
     return -- another item cannot go into this occupied slot
   end
-  try_candidates(pool, candidate_kind, function(item)
-    if not accepted_categories[item.category] then return 0 end
-    local request = {
-      name = item.name, quality = item.quality,
-      count = math.min(target_count, prototypes.item[item.name].stack_size),
-    }
-    if not slot.can_set_stack(request) then return 0 end
-    local removed = pool.inventory.remove(request)
-    if removed == 0 then return 0 end
-    request.count = removed
-    if slot.set_stack(request) then return removed end
-    refund(pool, request)
-    return 0
-  end)
+  local pool = get_pool(entity.surface.index, entity.force, pools)
+  if not pool then return end
+  for _, item in ipairs(pool[item_kind]) do
+    if item.count > 0 and accepted_categories[item_categories[item.name]] then
+      local request = {
+        name = item.name, quality = item.quality,
+        count = math.min(target_count, prototypes.item[item.name].stack_size, item.count),
+      }
+      if slot.can_set_stack(request) and slot.set_stack(request) then
+        consume(item, slot.count)
+        return
+      end
+    end
+  end
 end
 
 -- Character ammo slots pair 1:1 with gun slots, so each slot is topped up
 -- independently with ammo its own gun can fire. Slots with no gun get nothing.
-local function fill_character_ammo(entry, entity, pool)
+local function fill_character_ammo(entry, entity, pools)
   local guns = entity.get_inventory(defines.inventory.character_guns)
   local inventory = entity.get_inventory(entry.ammo_define)
   if not (guns and inventory) then return end
@@ -308,60 +286,81 @@ local function fill_character_ammo(entry, entity, pool)
       if accepted_categories then
         local accepted = {}
         for _, category in ipairs(accepted_categories) do accepted[category] = true end
-        fill_slot(slot, accepted, entry.ammo_target, pool, "ammos", ITEM_AMMO)
+        fill_slot(slot, accepted, entry.ammo_target, entity, pools, "ammos", ITEM_AMMO)
       end
     end
   end
 end
 
--- Prefer existing eligible stacks, then cached/discovered alternatives. A
--- successful partial fill is enough for this sweep; do not discover to finish it.
-local function fill_inventory(inventory, target_count, pool, candidate_kind, item_categories, accepted_categories)
+-- Prefer existing eligible stacks, then other supplied identities. A successful
+-- partial fill is enough for this sweep, preserving existing refill behavior.
+local function fill_inventory(inventory, target_count, entity, pools, item_kind, item_categories, accepted_categories)
   local current = 0
+  local preferred_slot, preferred_name, preferred_index
   for slot_index = 1, #inventory do
     local slot = inventory[slot_index]
-    if slot.valid_for_read and item_categories[slot.name] then current = current + slot.count end
+    if slot.valid_for_read then
+      local name = slot.name
+      local category = item_categories[name]
+      if category then
+        current = current + slot.count
+        if not preferred_slot and (not accepted_categories or accepted_categories[category]) then
+          preferred_slot, preferred_name, preferred_index = slot, name, slot_index
+        end
+      end
+    end
   end
   local budget = target_count - current
   if budget <= 0 then return end
-  local attempted_candidates = {}
-  for slot_index = 1, #inventory do
+  local pool = get_pool(entity.surface.index, entity.force, pools)
+  if not pool or #pool[item_kind] == 0 then return end
+  local rejected
+  if preferred_slot then
+    local item = pool_item(pool, preferred_name, preferred_slot.quality.name)
+    if item and item.count > 0 then
+      if transfer_inventory(inventory, item, budget) > 0 then return end
+      rejected = { [item] = true }
+    end
+  end
+  for slot_index = (preferred_index or #inventory) + 1, #inventory do
     local slot = inventory[slot_index]
     if slot.valid_for_read and item_categories[slot.name]
         and (not accepted_categories or accepted_categories[item_categories[slot.name]]) then
-      local item = { name = slot.name, quality = slot.quality.name }
-      local key = item.name .. "/" .. item.quality
-      if not attempted_candidates[key] then
-        attempted_candidates[key] = true
-        if transfer_inventory(pool, inventory, item, budget) > 0 then return end
+      local item = pool_item(pool, slot.name, slot.quality.name)
+      if item and item.count > 0 and not (rejected and rejected[item]) then
+        if transfer_inventory(inventory, item, budget) > 0 then return end
+        rejected = rejected or {}
+        rejected[item] = true
       end
     end
   end
-  try_candidates(pool, candidate_kind, function(item)
-    if accepted_categories and not accepted_categories[item.category] then return 0 end
-    return transfer_inventory(pool, inventory, item, budget)
-  end, attempted_candidates)
+  for _, item in ipairs(pool[item_kind]) do
+    if item.count > 0 and not (rejected and rejected[item])
+        and (not accepted_categories or accepted_categories[item_categories[item.name]]) then
+      if transfer_inventory(inventory, item, budget) > 0 then return end
+    end
+  end
 end
 
-local function fill_ammo(entry, entity, pool)
+local function fill_ammo(entry, entity, pools)
   if entry.type == "character" then
-    fill_character_ammo(entry, entity, pool)
+    fill_character_ammo(entry, entity, pools)
     return
   end
   local inventory = entity.get_inventory(entry.ammo_define)
-  if inventory then fill_inventory(inventory, entry.ammo_target, pool, "ammos", ITEM_AMMO) end
+  if inventory then fill_inventory(inventory, entry.ammo_target, entity, pools, "ammos", ITEM_AMMO) end
 end
 
-local function fill_fuel(entry, entity, pool)
+local function fill_fuel(entry, entity, pools)
   local inventory = entity.get_fuel_inventory()
   local burner = entity.burner
   local accepted_categories = burner and burner.fuel_categories
   if not (inventory and accepted_categories) then return end
   if entry.is_locomotive then
     -- Trains keep one full stack, without hoarding across all three slots.
-    fill_slot(inventory[1], accepted_categories, math.huge, pool, "fuels", ITEM_FUEL)
+    fill_slot(inventory[1], accepted_categories, math.huge, entity, pools, "fuels", ITEM_FUEL)
   else
-    fill_inventory(inventory, FUEL_TARGET, pool, "fuels", ITEM_FUEL, accepted_categories)
+    fill_inventory(inventory, FUEL_TARGET, entity, pools, "fuels", ITEM_FUEL, accepted_categories)
   end
 end
 
@@ -369,11 +368,8 @@ local function fill_entity(entry, pools)
   local entity = entry.entity
   if entity.to_be_deconstructed() then return end
 
-  local pool = get_pool(entity.surface.index, entity.force, pools)
-  if not pool then return end
-
-  if entry.ammo_define then fill_ammo(entry, entity, pool) end
-  if entry.fuel then fill_fuel(entry, entity, pool) end
+  if entry.ammo_define then fill_ammo(entry, entity, pools) end
+  if entry.fuel then fill_fuel(entry, entity, pools) end
 end
 
 ----------------------------------------------------------------------
@@ -420,6 +416,7 @@ local function on_tick()
     end
   end
   storage.cursor = cursor
+  debit_pools(pools)
 end
 
 ----------------------------------------------------------------------
@@ -433,7 +430,7 @@ local function initialize()
   storage.cursor = storage.cursor or 1
   -- Rebuild the old surface-only representative map on upgrades too.
   storage.representative_chests = {}
-  storage.supply_candidates = {}
+  storage.supply_candidates = nil -- discard the previous engine's persistent cache on upgrade
 
   for _, surface in pairs(game.surfaces) do
     for _, chest in ipairs(surface.find_entities_filtered{ name = CHEST }) do

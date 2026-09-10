@@ -1,5 +1,11 @@
 # Benchmarking refill changes inside Factorio
 
+For the automated **10,000-entity** comparison of commits `8af5786` and
+`19f9953`, including sustained demand during normal game ticks, use the
+[benchmark runner](../benchmarks/README.md). The manual procedure below records
+the original smaller experiment. See the
+[September 9 results](BENCHMARK_RESULTS_2026-09-09.md) for the measured comparison.
+
 Factorio can generate a map and run Lua without opening the game window. A
 temporary mod can create real entities and inventories, prepare repeatable
 workloads, and measure the refill engine with Factorio's own profiler.
@@ -30,10 +36,11 @@ must be validated separately with the production mod installed.
 Requirements: a compatible Factorio installation, Git, Python 3, and a POSIX shell.
 Run these snippets **from the repository root, in the same shell session**.
 
-For the Steam installation on this Mac:
+Use the standalone installation on this Mac. Both repository runners discover
+it before `PATH`; neither automatically searches Steam:
 
 ```sh
-export AUTO_FACTORIO_APP="$HOME/Library/Application Support/Steam/steamapps/common/Factorio/factorio.app"
+export AUTO_FACTORIO_APP="/Applications/factorio.app"
 export AUTO_FACTORIO="$AUTO_FACTORIO_APP/Contents/MacOS/factorio"
 export AUTO_FACTORIO_DATA="$AUTO_FACTORIO_APP/Contents/data"
 "$AUTO_FACTORIO" --version
@@ -43,10 +50,10 @@ export AUTO_BENCH="$(mktemp -d "${TMPDIR:-/tmp}/auto-loader-bench.XXXXXX")"
 export AUTO_BASELINE=HEAD
 ```
 
-For a standalone macOS installation, the app may be `/Applications/factorio.app`.
 On Linux, set `AUTO_FACTORIO` to the installation's `bin/x64/factorio` and
-`AUTO_FACTORIO_DATA` to its `data` directory. Check the version: the standalone
-and Steam installations can have different versions.
+`AUTO_FACTORIO_DATA` to its `data` directory. Explicit `--factorio`/`AUTO_FACTORIO`
+and `--data`/`AUTO_FACTORIO_DATA` override runner discovery. Check the selected
+version before comparing results.
 
 `AUTO_BASELINE` can be any Git revision. `HEAD` compares the committed code with
 the working copy. After committing a candidate, select its parent or another
