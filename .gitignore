@@ -5,3 +5,4 @@ graphics/.venv/
 benchmarks/artifacts/
 benchmarks/results/
 __pycache__/
+reference/

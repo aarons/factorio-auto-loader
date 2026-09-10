@@ -5,6 +5,7 @@ Date: 2026-09-09
     - Holding ammo in hand pauses refills of the players empty ammo slots so you can remove your guns.
       Refills resume after you put the ammo away and the delay expires. Occupied ammo slots keep topping
       up normally. This feature enables easier removal of guns so you can travel on the space ship.
+      Thanks to user ankel for raising this issue on the forum!
   Features:
     - Added a per-player ammo refill delay setting, defaulting to 10 seconds.
 ---------------------------------------------------------------------------------------------------
