@@ -1,26 +1,43 @@
 -- Run from the repository root: lua tests/supply.lua
 -- Exercise production refill logic, including the real tick boundary.
 defines = { inventory = { character_guns = 1, character_ammo = 2, chest = 3, turret_ammo = 4 }, events = {} }
-script = { on_init = function() end, on_configuration_changed = function() end,
-  on_load = function() end, on_event = function() end }
+local handlers = {}
+script = { on_init = function(fn) handlers.init = fn end,
+  on_configuration_changed = function(fn) handlers.configuration_changed = fn end,
+  on_load = function(fn) handlers.load = fn end, on_event = function() end }
 storage = { representative_chests = {} }
 settings = { global = { ['auto-loader-entities-per-tick'] = {value=100} } }
 prototypes = { item = {
-  bullet = { stack_size = 100 }, piercing = { stack_size = 100 },
-  shell = { stack_size = 100 }, coal = { stack_size = 50 },
-  hybrid = { stack_size = 50 },
+  bullet = { stack_size = 100, type = 'ammo', ammo_category = {name='bullet'} },
+  piercing = { stack_size = 100, type = 'ammo', ammo_category = {name='bullet'} },
+  shell = { stack_size = 100, type = 'ammo', ammo_category = {name='shotgun'} },
+  coal = { stack_size = 50, type = 'item', fuel_value = 4000000 },
+  hybrid = { stack_size = 50, type = 'ammo', ammo_category = {name='bullet'}, fuel_value = 4000000 },
+  multi = { stack_size = 50, type = 'item', fuel_value = 4000000 },
+  stone = { stack_size = 50, type = 'item', fuel_value = 0 },
+  uncategorized = { stack_size = 50, type = 'item', fuel_value = 4000000 },
 }, entity = {} }
+for name, prototype in pairs(prototypes.item) do
+  if prototype.fuel_value and prototype.fuel_value > 0 and name ~= 'uncategorized' then
+    prototype.fuel_categories = name == 'multi' and {'other', 'chemical'} or {'chemical'}
+  end
+  setmetatable(prototype, {__index=function(_, key)
+    if key == 'fuel_category' then
+      error("LuaItemPrototype doesn't contain key "..key)
+    end
+    if key == 'ammo_category' and prototype.type ~= 'ammo' then
+      error('ammo_category is only valid on ammo items')
+    end
+  end})
+end
 local file = assert(io.open('control.lua'))
 local source = file:read('*a'); file:close()
 local supply_functions = assert(load(source .. [[
-ITEM_AMMO.bullet, ITEM_AMMO.piercing, ITEM_AMMO.shell = 'bullet', 'bullet', 'shotgun'
-ITEM_FUEL.coal = 'chemical'
-ITEM_AMMO.hybrid, ITEM_FUEL.hybrid = 'bullet', 'chemical'
 return { fill_inventory = fill_inventory, fill_slot = fill_slot, get_pool = get_pool,
   fill_character_ammo = fill_character_ammo, debit_pools = debit_pools, tick = on_tick,
   fill_entity = fill_entity, initialize = initialize }
 ]]))()
-local ammo = { bullet = 'bullet', piercing = 'bullet', shell = 'shotgun' }
+local ammo = { bullet = {'bullet'}, piercing = {'bullet'}, shell = {'shotgun'} }
 local function assert_equal(actual, expected)
   assert(actual == expected, ('expected %s, got %s'):format(expected, actual))
 end
@@ -104,6 +121,13 @@ local function entity(surface_index, force_index)
     to_be_deconstructed=function() return false end}
 end
 local consumer = entity()
+-- Exercise the registered lifecycle handlers, not hand-populated caches. Loading
+-- has no game access and must not touch persistent storage.
+handlers.init()
+local saved_game, saved_storage = game, storage
+game, storage = nil, nil
+handlers.load()
+game, storage = saved_game, saved_storage
 local function fill(pools, inventory, who)
   supply_functions.fill_inventory(inventory, 10, who or consumer, pools, 'ammos', ammo)
 end
@@ -254,10 +278,57 @@ supply_functions.debit_pools(pools); assert_equal(train_inventory[1].count,50); 
 -- An item that is both fuel and ammo shares one balance, not two inventories.
 stock={['hybrid/normal']=15}; supply_inventory=add_chest(1,1,stock); pools={}
 local hybrid_ammo, hybrid_fuel=slot(),slot()
-supply_functions.fill_inventory(destination(hybrid_ammo,100),10,consumer,pools,'ammos',{hybrid='bullet'})
-supply_functions.fill_inventory(destination(hybrid_fuel,100),10,consumer,pools,'fuels',{hybrid='chemical'},{chemical=true})
+supply_functions.fill_inventory(destination(hybrid_ammo,100),10,consumer,pools,'ammos',{hybrid={'bullet'}})
+supply_functions.fill_inventory(destination(hybrid_fuel,100),10,consumer,pools,'fuels',{hybrid={'chemical'}},{chemical=true})
 supply_functions.debit_pools(pools)
 assert_equal(hybrid_ammo.count+hybrid_fuel.count,15); assert_equal(stock['hybrid/normal'],0); assert_equal(supply_inventory.removes,1)
+
+-- Fuel matching uses every category, for both inventory and locomotive-slot
+-- refills. Include occupied slots and mismatches; the mock inventory itself
+-- deliberately doesn't enforce burner categories.
+for _, is_train in ipairs({false, true}) do
+  for _, initial_count in ipairs({0, 2}) do
+    for _, category in ipairs({'chemical', 'other', 'nuclear'}) do
+      stock = {['multi/rare']=60, ['stone/normal']=10, ['uncategorized/normal']=10}
+      supply_inventory = add_chest(1,1,stock); pools = {}
+      item_stack = slot(initial_count > 0 and 'multi' or nil, initial_count, 'rare')
+      local inventory = destination(item_stack,50)
+      inventory[2] = slot()
+      local burner = entity()
+      burner.burner = {fuel_categories={[category]=true}}
+      burner.get_fuel_inventory = function() return inventory end
+      supply_functions.fill_entity({entity=burner,fuel=true,is_locomotive=is_train},pools)
+      supply_functions.debit_pools(pools)
+      local expected = category == 'nuclear' and initial_count or (is_train and 50 or 10)
+      assert_equal(item_stack.count,expected)
+      assert_equal(inventory[2].count,0)
+      assert_equal(stock['multi/rare']+item_stack.count,60+initial_count)
+      if expected > initial_count then assert_equal(item_stack.quality.name,'rare') end
+      local pool = supply_functions.get_pool(1,forces[1],pools)
+      assert_equal(pool.available.stone,nil)
+      assert_equal(pool.available.uncategorized,nil)
+    end
+  end
+end
+
+-- If the first occupied fuel stack is unavailable, a later compatible stack
+-- still takes precedence over new fuel identities in supply.
+stock = {['coal/normal']=20, ['multi/rare']=20}
+supply_inventory = add_chest(1,1,stock); pools = {}
+local burner = entity()
+local fuel_inventory = {slot('hybrid',1),slot('multi',1,'rare')}
+fuel_inventory.insert = function(item)
+  assert_equal(item.name,'multi')
+  fuel_inventory[2].count = fuel_inventory[2].count + item.count
+  return item.count
+end
+burner.burner = {fuel_categories={chemical=true}}
+burner.get_fuel_inventory = function() return fuel_inventory end
+supply_functions.fill_entity({entity=burner,fuel=true},pools)
+supply_functions.debit_pools(pools)
+assert_equal(fuel_inventory[2].count,9)
+assert_equal(stock['multi/rare'],12); assert_equal(stock['coal/normal'],20)
+print('Fuel categories and init/load checks passed')
 
 -- Real on_tick debits independently across two surfaces and two forces.
 storage.order, storage.fillables, storage.cursor = {}, {}, 1
@@ -396,7 +467,7 @@ assert_equal(supply_inventory.reads,0)
 local order, fillables = storage.order, storage.fillables
 fillables[1].ammo_refill_after=9000
 storage.supply_candidates={stale=true}
-supply_functions.initialize()
+handlers.configuration_changed()
 assert_equal(storage.supply_candidates,nil)
 assert_equal(storage.order,order); assert_equal(storage.fillables,fillables)
 assert_equal(fillables[1].ammo_refill_after,9000)

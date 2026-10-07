@@ -14,6 +14,11 @@ shortages/restocking, exact quality and existing-stack preference, rejected and
 partial insertion/slot placement, locomotive slot limits, changing forces and
 surfaces, missing/replaced chests, and cleanup of the old supply cache on upgrade.
 The mocks deliberately reject refunds and simulate partial API acceptance.
+The Lua tests exercise the registered init/load/configuration-change handlers.
+They model Factorio 2.1.20's plural fuel categories and reject the removed
+singular property. Fuel checks cover matching any category, incompatible
+burners, empty and occupied locomotive slots, existing-stack preference, quality,
+and conservation of supply. Loading is tested with `game` and `storage` unavailable.
 The Python check verifies that both runners prefer standalone macOS Factorio
 over a `PATH` copy, honor explicit overrides, and handle missing installations.
 
@@ -50,7 +55,7 @@ python3 tests/run_factorio.py --factorio /path/to/factorio --data /path/to/data
 
 `AUTO_FACTORIO` and `AUTO_FACTORIO_DATA` are also supported, as in the
 [benchmarking guide](BENCHMARKING.md). Requirements are Python 3, a compatible
-Factorio client (currently 2.1), and a graphical desktop. No clicks are needed.
+Factorio client (2.1.20 or later), and a graphical desktop. No clicks are needed.
 A headless-only server is insufficient for this test: `--create` and
 `--benchmark` do not create a player, and a character without a player cannot
 exercise the player's cursor stack.

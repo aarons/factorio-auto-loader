@@ -41,9 +41,9 @@ local BUILD_EVENTS = {
 -- Prototype-derived caches (rebuilt every load; never stored).
 ----------------------------------------------------------------------
 
--- item name -> fuel category (string), only for items that actually burn.
+-- item name -> fuel categories (array of strings), only for items that actually burn.
 local ITEM_FUEL = {}
--- item name -> ammo category (string).
+-- item name -> ammo categories (single-element array of strings).
 local ITEM_AMMO = {}
 -- entity types worth scanning at init (ammo types + every burner type).
 local FILLABLE_TYPES = {}
@@ -55,11 +55,13 @@ local function build_caches()
 
   for name, prototype in pairs(prototypes.item) do
     local fuel_value = prototype.fuel_value
-    if fuel_value and fuel_value > 0 then ITEM_FUEL[name] = prototype.fuel_category end
+    if fuel_value and fuel_value > 0 then
+      ITEM_FUEL[name] = prototype.fuel_categories
+    end
     -- ammo_category is only valid to read on ammo items.
     if prototype.type == "ammo" then
       local ammo_category = prototype.ammo_category
-      if ammo_category then ITEM_AMMO[name] = ammo_category.name end
+      if ammo_category then ITEM_AMMO[name] = { ammo_category.name } end
     end
   end
 
@@ -225,13 +227,22 @@ end
 -- Filling.
 ----------------------------------------------------------------------
 
+local function accepts_category(accepted_categories, item_categories)
+  if not accepted_categories then return true end
+  if not item_categories then return false end
+  for _, category in ipairs(item_categories) do
+    if accepted_categories[category] then return true end
+  end
+  return false
+end
+
 -- Occupied slots only accept their exact item/quality. Empty slots additionally
 -- validate their filters before removing anything from supply.
 local function fill_slot(slot, accepted_categories, target_count, entity, pools, item_kind, item_categories)
   if not slot then return end
   if slot.valid_for_read then
     local name = slot.name
-    if not accepted_categories[item_categories[name]] then return end
+    if not accepts_category(accepted_categories, item_categories[name]) then return end
     local gap = math.min(target_count, prototypes.item[name].stack_size) - slot.count
     if gap <= 0 then return end
     local pool = get_pool(entity.surface.index, entity.force, pools)
@@ -246,7 +257,7 @@ local function fill_slot(slot, accepted_categories, target_count, entity, pools,
   local pool = get_pool(entity.surface.index, entity.force, pools)
   if not pool then return end
   for _, item in ipairs(pool[item_kind]) do
-    if item.count > 0 and accepted_categories[item_categories[item.name]] then
+    if item.count > 0 and accepts_category(accepted_categories, item_categories[item.name]) then
       local request = {
         name = item.name, quality = item.quality,
         count = math.min(target_count, prototypes.item[item.name].stack_size, item.count),
@@ -301,10 +312,10 @@ local function fill_inventory(inventory, target_count, entity, pools, item_kind,
     local slot = inventory[slot_index]
     if slot.valid_for_read then
       local name = slot.name
-      local category = item_categories[name]
-      if category then
+      local categories = item_categories[name]
+      if categories then
         current = current + slot.count
-        if not preferred_slot and (not accepted_categories or accepted_categories[category]) then
+        if not preferred_slot and accepts_category(accepted_categories, categories) then
           preferred_slot, preferred_name, preferred_index = slot, name, slot_index
         end
       end
@@ -325,7 +336,7 @@ local function fill_inventory(inventory, target_count, entity, pools, item_kind,
   for slot_index = (preferred_index or #inventory) + 1, #inventory do
     local slot = inventory[slot_index]
     if slot.valid_for_read and item_categories[slot.name]
-        and (not accepted_categories or accepted_categories[item_categories[slot.name]]) then
+        and accepts_category(accepted_categories, item_categories[slot.name]) then
       local item = pool_item(pool, slot.name, slot.quality.name)
       if item and item.count > 0 and not (rejected and rejected[item]) then
         if transfer_inventory(inventory, item, budget) > 0 then return end
@@ -336,7 +347,7 @@ local function fill_inventory(inventory, target_count, entity, pools, item_kind,
   end
   for _, item in ipairs(pool[item_kind]) do
     if item.count > 0 and not (rejected and rejected[item])
-        and (not accepted_categories or accepted_categories[item_categories[item.name]]) then
+        and accepts_category(accepted_categories, item_categories[item.name]) then
       if transfer_inventory(inventory, item, budget) > 0 then return end
     end
   end

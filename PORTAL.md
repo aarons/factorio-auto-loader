@@ -6,13 +6,15 @@ Description
 
 # Auto-Loader Chest
 
+# Auto-Loader Chest
+
 This is an alternative version of the excellent [Ammo-Loader+](https://mods.factorio.com/mod/ammo-loader) mod. Place fuel and ammo in the chest and then turrets and fuel-burners (trains, furnaces, boilers, etc.) will automatically get refilled.
 
 **What's different?**
 
-The ammo-loader+ mod doesn't currently work with quality ammo and fuel. I looked at submitting a patch, but it required more work than expected. It was easier to start fresh.
+This mod works with quality ammo and fuel, and uses more of the native api features that have come out over the years. I did look into submitting a patch for ammo-loader+, but it required more work than expected. It was easier to start fresh.
 
-This mod uses Factorio's core functionality where possible to replace custom features in ammo-loader+. There are a few things that ammo-loader+ does that this mod currently does not do: refunding ammo to chest, entity filters, and upgrading ammo to higher damage ones pro-actively.
+There are a few things that ammo-loader+ does that this mod currently does not do: refunding ammo to chest, entity filters, and upgrading ammo to higher damage ones pro-actively.
 
 **Features & Design**
 
@@ -48,10 +50,10 @@ The chest uses the first matching slot or item that's valid for the consumer. So
 - for an empty turret, it will pick from the first ammo in the chest
 - for a refill turret, it will try to refill the matching ammo. If not matching ammo exists it will wait until the turret runs out, then replace with the next ammo.
 
-If you want to prioritize consumption of higher quality ammo for example, you would use combinators to load the chest with preferred types, and only add in lower tier ammo when the preferred type runs low.
+If you want to prioritize consumption of higher quality ammo for example, you would use combinators to load the chest with preferred types, and only add in lower tier ammo when the preffered type runs low.
 
 ## Feedback & Disclaimers
 
 It's always great hearing from folks who enjoy a mod, find issues, or have suggestions/requests. Please feel free to reach out!
 
-Claude Fable was used in writing and editing the code and in-game assets. I took the time to review, edit, and redirect were appropriate to keep the code easy to understand and performant. The in-game chest artwork was entirely its own work, and not something I would have taken the time to create on my own, so I'm happy it exists (and it's soo cute!)
+AI models Fable and Astra were used in writing the code and generating in-game assets. I'm an experienced engineer and took the time to review, edit, and redirect were appropriate to keep the code easy to understand and performant. The in-game chest artwork was entirely AI, and not something I would have taken the time to create, so I'm happy it exists (and it's soo cute!)
