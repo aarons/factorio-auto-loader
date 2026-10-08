@@ -1,10 +1,20 @@
 -- Run from the repository root: lua tests/supply.lua
 -- Exercise production refill logic, including the real tick boundary.
-defines = { inventory = { character_guns = 1, character_ammo = 2, chest = 3, turret_ammo = 4 }, events = {} }
+defines = { inventory = { character_guns = 1, character_ammo = 2, chest = 3, turret_ammo = 4 }, events = setmetatable({}, {__index=function(t,k) rawset(t,k,k); return k end}) }
 local handlers = {}
-script = { on_init = function(fn) handlers.init = fn end,
-  on_configuration_changed = function(fn) handlers.configuration_changed = fn end,
-  on_load = function(fn) handlers.load = fn end, on_event = function() end }
+local scanning_allowed = false
+local function bootstrap(fn)
+  return function(...)
+    scanning_allowed=true
+    fn(...)
+    scanning_allowed=false
+  end
+end
+script = { on_init = function(fn) handlers.init = bootstrap(fn) end,
+  on_configuration_changed = function(fn) handlers.configuration_changed = bootstrap(fn) end,
+  on_load = function(fn) handlers.load = fn end,
+  on_event = function(event,fn) handlers[event] = event == 'on_surface_imported' and bootstrap(fn) or fn end,
+  register_on_object_destroyed = function(entity) return entity.unit_number + 10000 end }
 storage = { representative_chests = {} }
 settings = { global = { ['auto-loader-entities-per-tick'] = {value=100} } }
 prototypes = { item = {
@@ -89,12 +99,22 @@ local function destination(item_stack, capacity, insertion_limit)
   return inventory
 end
 local forces = {{index=1}, {index=2}, {index=3}}
-local chests = {}
+local chests, linked_inventories = {}, {{}, {}, {}}
+local next_unit = 1000
+for index, force in ipairs(forces) do
+  force.lookups = 0
+  force.get_linked_inventory = function(name, link_id)
+    assert_equal(name, 'auto-loader-chest')
+    force.lookups = force.lookups + 1
+    return linked_inventories[index][link_id]
+  end
+end
 game = {surfaces={}, tick=0, players={}}
 for surface_index=1,2 do
   local surface = {index=surface_index, searches=0}
   chests[surface_index] = {}
   surface.find_entities_filtered = function(filter)
+    assert(scanning_allowed, 'Refill processing must never search for chests')
     surface.searches = surface.searches + 1
     local found = {}
     if filter.name then
@@ -108,12 +128,13 @@ for surface_index=1,2 do
 end
 local function add_chest(surface_index, force_index, stock)
   local inventory = supply(stock)
-  local chest = {valid=true, name='auto-loader-chest', force=forces[force_index],
+  next_unit = next_unit + 1
+  local chest = {valid=true, unit_number=next_unit, name='auto-loader-chest', force=forces[force_index],
     surface=game.surfaces[surface_index], link_id=surface_index,
     get_inventory=function() return inventory end}
   chests[surface_index][force_index] = chest
-  storage.representative_chests[surface_index] = storage.representative_chests[surface_index] or {}
-  storage.representative_chests[surface_index][force_index] = chest
+  linked_inventories[force_index][surface_index] = inventory
+  handlers.script_raised_built{entity=chest}
   return inventory, chest
 end
 local function entity(surface_index, force_index)
@@ -122,10 +143,18 @@ local function entity(surface_index, force_index)
 end
 local consumer = entity()
 -- Exercise the registered lifecycle handlers, not hand-populated caches. Loading
--- has no game access and must not touch persistent storage.
+-- has no game access and may read, but never write, persistent storage.
 handlers.init()
 local saved_game, saved_storage = game, storage
-game, storage = nil, nil
+local function readonly(value)
+  if type(value) ~= 'table' then return value end
+  return setmetatable({}, {__index=function(_,key) return readonly(value[key]) end,
+    __newindex=function() error('on_load wrote storage') end,
+    __pairs=function() return function(_,key)
+      local k,v=next(value,key); return k,readonly(v)
+    end,nil,nil end})
+end
+game, storage = nil, readonly(storage)
 handlers.load()
 game, storage = saved_game, saved_storage
 local function fill(pools, inventory, who)
@@ -359,24 +388,20 @@ supply_functions.tick()
 assert_equal(stacks[1].count,10); assert_equal(stocks[4]['bullet/normal'],0)
 assert_equal(stacks[4].count,5)
 
--- Missing chests are searched once per tick, without borrowing another force's pool.
+-- Missing membership never searches or borrows another force's linked supply.
 pools={}; local absent=entity(1,3); local before=game.surfaces[1].searches
 for _=1,10 do fill(pools,destination(slot(),100),absent) end
-assert_equal(game.surfaces[1].searches,before+1)
 fill({},destination(slot(),100),absent)
-assert_equal(game.surfaces[1].searches,before+2)
--- Mined/moved/force-changed representatives are rediscovered and relinked.
-local _, stale=add_chest(1,1,{})
-stale.force=forces[2]
-chests[1][1]=nil
-assert_equal(supply_functions.get_pool(1,forces[1],{}),nil)
-local replacement=supply({['bullet/normal']=10})
-chests[1][1]={valid=true,name='auto-loader-chest',surface=game.surfaces[1],force=forces[1],link_id=99,
-  get_inventory=function() return replacement end}
-assert_equal(supply_functions.get_pool(1,forces[1],{}).inventory,replacement)
-assert_equal(chests[1][1].link_id,1)
-chests[1][1].valid=false
-assert_equal(supply_functions.get_pool(1,forces[1],{}),nil)
+assert_equal(game.surfaces[1].searches,before)
+assert_equal(forces[3].lookups,0)
+-- Nil inventory lookups are cached for the tick, even with live membership.
+add_chest(1,3,{})
+linked_inventories[3][1]=nil
+before=forces[3].lookups; pools={}
+for _=1,10 do assert_equal(supply_functions.get_pool(1,forces[3],pools),nil) end
+assert_equal(forces[3].lookups,before+1)
+assert_equal(supply_functions.get_pool(1,forces[3],{}),nil)
+assert_equal(forces[3].lookups,before+2)
 
 -- Deconstruction skips all demand, even for otherwise empty inventories.
 local skipped=entity(); skipped.to_be_deconstructed=function() return true end
@@ -463,7 +488,7 @@ refill(1000)
 assert_equal(supply_inventory.reads,0)
 
 -- Upgrade initialization drops stale persistent supply identities but retains
--- registry/cursor and player delay state; on_load remains prototype-only.
+-- registry/cursor and player delay state; on_load only reads storage.
 local order, fillables = storage.order, storage.fillables
 fillables[1].ammo_refill_after=9000
 storage.supply_candidates={stale=true}
@@ -472,3 +497,113 @@ assert_equal(storage.supply_candidates,nil)
 assert_equal(storage.order,order); assert_equal(storage.fillables,fillables)
 assert_equal(fillables[1].ammo_refill_after,9000)
 print('Demand gating and upgrade checks passed')
+
+-- Registry lifecycle through registered event handlers.
+local function clear_membership()
+  for index in pairs(game.surfaces) do handlers.on_surface_cleared{surface_index=index} end
+  assert_equal(storage.chest_count,0)
+  assert_equal(next(storage.chest_records),nil)
+  assert_equal(next(storage.chest_destructions),nil)
+  assert_equal(handlers.on_tick,nil)
+end
+local function load_readonly()
+  local current_game,current_storage=game,storage
+  game,storage=nil,readonly(storage)
+  handlers.on_tick=nil
+  handlers.load()
+  game,storage=current_game,current_storage
+end
+clear_membership()
+load_readonly(); assert_equal(handlers.on_tick,nil)
+local inv,first=add_chest(1,1,{['bullet/normal']=50})
+assert_equal(storage.chest_count,1); assert(handlers.on_tick)
+for _,event in ipairs({'on_built_entity','on_robot_built_entity','on_space_platform_built_entity',
+    'script_raised_built','script_raised_revive'}) do handlers[event]{entity=first} end
+handlers.on_entity_cloned{destination=first}
+assert_equal(storage.chest_count,1)
+load_readonly(); assert(handlers.on_tick)
+local _,second=add_chest(1,1,{['bullet/normal']=50})
+assert_equal(storage.chest_buckets[1][1].count,2)
+handlers.on_player_mined_entity{entity=first}
+first.valid=false
+handlers.on_object_destroyed{registration_number=first.unit_number+10000,useful_id=first.unit_number}
+assert_equal(storage.chest_count,1)
+assert(supply_functions.get_pool(1,forces[1],{}))
+-- Backstop arrives late: invalidate the last chest, leave inventory accessible.
+second.valid=false
+assert_equal(supply_functions.get_pool(1,forces[1],{}),nil)
+assert_equal(storage.chest_count,0); assert_equal(handlers.on_tick,nil)
+assert(linked_inventories[1][1].valid)
+handlers.on_object_destroyed{registration_number=second.unit_number+10000,useful_id=second.unit_number}
+assert_equal(storage.chest_count,0)
+for _,event in ipairs({'on_robot_mined_entity','on_space_platform_mined_entity','on_entity_died','script_raised_destroy'}) do
+  local _,chest=add_chest(1,1,{})
+  handlers[event]{entity=chest}
+  assert_equal(storage.chest_count,0); assert_equal(handlers.on_tick,nil)
+end
+-- Marking for deconstruction leaves supply enabled.
+inv,first=add_chest(1,1,{})
+first.to_be_deconstructed=function() return true end
+assert(supply_functions.get_pool(1,forces[1],{}))
+-- A merge rebuckets known members, preserving destination memberships.
+local _,merged=add_chest(1,2,{})
+first.force=forces[2]
+handlers.on_forces_merged{source_index=1,destination=forces[2]}
+assert_equal(storage.chest_buckets[1][1],nil)
+assert_equal(storage.chest_buckets[1][2].count,2)
+assert_equal(storage.chest_count,2)
+handlers.on_surface_deleted{surface_index=1}
+assert_equal(storage.chest_count,0)
+handlers.on_object_destroyed{registration_number=first.unit_number+10000,useful_id=first.unit_number}
+-- Reused surface index cannot retain old authorization; import uses surface_index.
+assert_equal(supply_functions.get_pool(1,forces[2],{}),nil)
+chests[1]={}; chests[2]={}
+inv,first=add_chest(1,1,{})
+handlers.on_surface_cleared{surface_index=1}
+local searches=game.surfaces[1].searches
+handlers.on_surface_imported{surface_index=1}
+assert_equal(storage.chest_count,1)
+assert_equal(game.surfaces[1].searches,searches+2)
+handlers.on_surface_imported{surface_index=1}
+assert_equal(storage.chest_count,1)
+assert_equal(handlers.on_area_cloned,nil)
+-- Migration drops all legacy caches and rebuilds exact membership once.
+storage.representative_chests={stale=true}
+handlers.configuration_changed()
+assert_equal(storage.representative_chests,nil)
+assert_equal(storage.chest_count,1)
+-- Supply gating precedes inventories, burner and player settings; visits stay bounded.
+storage.order,storage.fillables,storage.cursor={},{},1
+settings.global['auto-loader-entities-per-tick'].value=2
+for i=1,6 do
+  local who=entity(2,3)
+  who.get_inventory=function() error('Unsupplied inventory inspected') end
+  who.get_fuel_inventory=function() error('Unsupplied fuel inspected') end
+  who.to_be_deconstructed=function() error('Unsupplied consumer inspected') end
+  storage.order[i]=i
+  storage.fillables[i]={entity=who,ammo_define=4,fuel=true,type='character'}
+end
+local search_count=game.surfaces[2].searches
+handlers.on_tick()
+assert_equal(storage.cursor,3)
+assert_equal(game.surfaces[2].searches,search_count)
+handlers.on_tick(); assert_equal(storage.cursor,5)
+-- Stale consumer slots also consume the visit budget.
+storage.cursor=1
+storage.fillables[1]=nil; storage.fillables[2]=nil
+handlers.on_tick(); assert_equal(storage.cursor,3)
+clear_membership()
+print('Chest lifecycle, load restoration, no-search and bounded scheduling checks passed')
+
+-- The real sweep's eligibility ledger must leave full consumers demand-driven.
+local lazy_inventory=add_chest(1,1,{['bullet/normal']=50})
+local full=entity()
+local full_inventory=destination(slot('bullet',10),100)
+full.get_inventory=function() return full_inventory end
+storage.order,storage.fillables,storage.cursor={1},{[1]={entity=full,ammo_define=4,ammo_target=10}},1
+local lookups=forces[1].lookups
+handlers.on_tick()
+assert_equal(lazy_inventory.reads,0)
+assert_equal(forces[1].lookups,lookups)
+clear_membership()
+print('Supplied full-consumer demand gating passed')

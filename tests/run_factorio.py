@@ -23,7 +23,8 @@ def find_factorio(explicit=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--test', choices=['player_ammo','supply'], default='player_ammo')
+    parser.add_argument('--test', choices=['player_ammo','supply','lifecycle'], default='player_ammo')
+    parser.add_argument('--upgrade-from', help='Create with control.lua from this Git revision, then upgrade to the worktree')
     parser.add_argument('--factorio', default=os.environ.get('AUTO_FACTORIO'),
                         help='Executable (default: /Applications/factorio.app, then PATH; AUTO_FACTORIO overrides)')
     parser.add_argument('--data', default=os.environ.get('AUTO_FACTORIO_DATA'),
@@ -43,10 +44,16 @@ def main():
     print(f'Test workspace and logs: {root}', flush=True)
     (root / 'user').mkdir()
     info = json.loads((REPO / 'info.json').read_text())
-    mod = root / 'mods' / f"{info['name']}_{info['version']}"
+    initial_info = (json.loads(subprocess.check_output(
+        ['git','show',f'{args.upgrade_from}:info.json'],cwd=REPO)) if args.upgrade_from else info)
+    mod = root / 'mods' / f"{initial_info['name']}_{initial_info['version']}"
     mod.mkdir(parents=True)
     for name in ['info.json', 'control.lua', 'data.lua', 'settings.lua']:
         shutil.copy2(REPO / name, mod / name)
+    if args.upgrade_from:
+        (mod / 'info.json').write_text(json.dumps(initial_info))
+        (mod / 'control.lua').write_bytes(subprocess.check_output(
+            ['git','show',f'{args.upgrade_from}:control.lua'],cwd=REPO))
     for name in ['graphics', 'locale']:
         shutil.copytree(REPO / name, mod / name)
     fixture_name = 'auto-loader-test'
@@ -61,7 +68,7 @@ def main():
     (fixture / 'settings-final-fixes.lua').write_text(
         "data.raw['int-setting']['auto-loader-player-ammo-refill-delay'].default_value = 1\n"
         + ("data.raw['int-setting']['auto-loader-entities-per-tick'].default_value = 100\n"
-           if args.test == 'supply' else ''))
+           if args.test != 'player_ammo' else ''))
     if args.test == 'supply':
         (fixture / 'data-final-fixes.lua').write_text(
             "local turret = table.deepcopy(data.raw['ammo-turret']['gun-turret'])\n"
@@ -83,14 +90,23 @@ def main():
     with (root / 'create.log').open('w') as output:
         subprocess.run(command + ['--create', str(root / 'test.zip')],
                        stdout=output, stderr=subprocess.STDOUT, check=True, timeout=args.timeout)
-    if args.test == 'supply':
+    if args.upgrade_from:
+        shutil.copy2(REPO / 'control.lua', mod / 'control.lua')
+        upgraded = dict(info)
+        if upgraded['version'] == initial_info['version']:
+            parts = info['version'].split('.')
+            parts[-1] = str(int(parts[-1])+1)
+            upgraded['version'] = '.'.join(parts)
+        (mod / 'info.json').write_text(json.dumps(upgraded))
+        mod.rename(mod.with_name(f"{info['name']}_{upgraded['version']}"))
+    if args.test != 'player_ammo':
         with (root / 'test.log').open('w') as output:
             subprocess.run(command + ['--benchmark',str(root/'test.zip'),
-                '--benchmark-ticks','3','--benchmark-runs','1'], stdout=output,
+                '--benchmark-ticks',str(18 if args.test == 'lifecycle' else 3),'--benchmark-runs','1'], stdout=output,
                 stderr=subprocess.STDOUT, check=True, timeout=args.timeout)
         log = (root/'test.log').read_text()
         if 'AUTO_LOADER_TEST SUCCESS' not in log:
-            raise RuntimeError(f'Factorio supply test incomplete; inspect {root}/test.log')
+            raise RuntimeError(f'Factorio integration test incomplete; inspect {root}/test.log')
         print('\n'.join(line for line in log.splitlines() if 'AUTO_LOADER_TEST' in line))
         return 0
     # Loading a single-player game creates the real LuaPlayer needed for cursor_stack.

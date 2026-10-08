@@ -1,4 +1,16 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.2.2
+Date: 2026-10-07
+  Optimizations:
+    - Track supply chest membership instead of searching for chests during refills.
+    - Stop refill ticks when no chests exist and skip inventory checks for consumers without supply chests.
+    - Bound stale consumer cleanup by the per-tick processing budget.
+  Bugfixes:
+    - Maintain chest membership through destruction, force merges, surface clearing, and deletion.
+    - Correct imported-surface discovery and rely on individual entity events for area cloning.
+  Changes:
+    - Rebuild chest membership when upgrading existing saves.
+---------------------------------------------------------------------------------------------------
 Version: 1.2.1
 Date: 2026-10-07
   Bugfixes:

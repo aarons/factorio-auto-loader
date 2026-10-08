@@ -12,13 +12,20 @@ inventories. They check lazy supply access (including delayed/unarmed character
 slots), one snapshot per surface/force per tick, batched debits, conservation,
 shortages/restocking, exact quality and existing-stack preference, rejected and
 partial insertion/slot placement, locomotive slot limits, changing forces and
-surfaces, missing/replaced chests, and cleanup of the old supply cache on upgrade.
+surfaces, membership-gated missing/replaced chests, and cleanup of the old supply
+cache on upgrade.
 The mocks deliberately reject refunds and simulate partial API acceptance.
 The Lua tests exercise the registered init/load/configuration-change handlers.
 They model Factorio 2.1.20's plural fuel categories and reject the removed
 singular property. Fuel checks cover matching any category, incompatible
 burners, empty and occupied locomotive slots, existing-stack preference, quality,
-and conservation of supply. Loading is tested with `game` and `storage` unavailable.
+and conservation of supply. Loading is tested with `game` unavailable and
+recursively read-only storage,
+including both active and disabled tick subscription restoration. Chest searches
+are prohibited outside bootstrap handlers. Registry cases cover duplicate build
+and removal events, invalid last members with surviving linked inventories,
+nil lookup caching, force merges, imports, surface cleanup/index reuse, legacy
+migration, and bounded visits to unsupplied/stale consumers.
 The Python check verifies that both runners prefer standalone macOS Factorio
 over a `PATH` copy, honor explicit overrides, and handle missing installations.
 
@@ -30,11 +37,36 @@ python3 tests/run_factorio.py --test supply
 
 This runs three advancing ticks after saving and reloading the working mod in
 Factorio. It validates four independent pools across two surfaces and two
-forces, linked-chest replacement, normal/rare ammo, shortages, a force without
-a chest, a filtered character slot, and a turret rejecting incompatible ammo.
+forces, linked membership after removing one chest, normal/rare ammo, shortages,
+a force without a chest, a filtered character slot, and a turret rejecting incompatible ammo.
 A fixture turret requests 120 magazines but can hold only 100; exactly 100 must
 be debited from its barred supply chest. Assertions run after each production
 tick. This test needs no graphical desktop or player.
+
+## Lifecycle and upgrade integration tests
+
+```sh
+python3 tests/run_factorio.py --test lifecycle
+python3 tests/run_factorio.py --test supply --upgrade-from HEAD
+```
+
+The lifecycle fixture starts from a saved world with a registered consumer and
+no chests. Over 18 advancing ticks it exercises first construction, direct linked
+inventory access, entity/area cloning, removal of one and the last chest (including
+silent destruction with delayed notifications), rebuilding, deconstruction marks,
+death, force merging, empty-chest restocking, surface clearing and deletion.
+The existing supply fixture covers loading with active membership.
+
+`--upgrade-from` creates the save using that Git revision's `control.lua`, then
+copies the working implementation/version to trigger a real configuration
+change. If both revisions share a version, it bumps the temporary version. Production version files are untouched.
+Use the pre-change revision when HEAD already includes the implementation.
+
+Normal player/robot/platform build and mining handlers, script revival, and map
+imports are exercised by Lua mocks. The graphical player test also checks actual
+player mining. Actual map-editor import and robot/platform operations are not
+covered by the headless fixture. There is no documented script API to initiate
+surface import; the import mock verifies the event field and bootstrap scans.
 
 ## Player ammo integration test
 
@@ -76,6 +108,7 @@ The fixture checks:
   one-second delay expires, then refills it from the chest.
 - Removing ammo again, then removing the gun and putting the ammo away, leaves
   the ammo slot empty for another two seconds.
+- Rearming and mining the last chest leaves ammo empty on the following tick.
 
 Each waiting phase checks the slot on every tick. Supply counts are checked too,
 so an empty chest cannot produce a false pass for the delay or gun-removal cases.

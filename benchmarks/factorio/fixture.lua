@@ -9,26 +9,39 @@ function M.create(raise_built)
     for y=-8,math.ceil(config.entities/1000)*4+4 do tiles[#tiles+1] = {name='grass-1', position={x,y}} end
   end
   surface.set_tiles(tiles)
-  local state = {entities={}, inventories={}, chests={}, supplies={}}
-  for i=1,10 do
-    -- One force per surface keeps both versions' pool semantics equivalent.
+  local state = {entities={}, inventories={}, chests={}, supplies={}, surfaces={}, supplied={}}
+  local absent = game.forces["bench-absent"] or game.create_force("bench-absent")
+  absent.set_friend(game.forces.player,true)
+  game.forces.player.set_friend(absent,true)
+  for i=1,(config.scenario=="player_no_chest" and 1 or 10) do
+    -- Mixed supply alternates absent surfaces and absent forces on supplied surfaces.
     local s = i==1 and surface or game.create_surface('bench-'..i, {width=416,height=416,
       autoplace_settings={entity={treat_missing_as_default=false},
         tile={treat_missing_as_default=false},decorative={treat_missing_as_default=false}}})
     s.set_tiles(tiles)
-    state.chests[i] = assert(s.create_entity{
-      name='auto-loader-chest', position={4,-4}, force='player', raise_built=raise_built,
-    })
-    state.chests[i].link_id = s.index
-    state.supplies[i] = state.chests[i].get_inventory(defines.inventory.chest)
-    assert(#state.supplies[i] == 48, 'Expected default 48-slot chest')
+    state.surfaces[i] = s
+    if config.scenario~='no_chest' and config.scenario~='player_no_chest'
+        and (config.scenario~='mixed_supply' or i%2==1) then
+      state.chests[i] = assert(s.create_entity{
+        name='auto-loader-chest', position={4,-4}, force='player', raise_built=raise_built,
+      })
+      state.chests[i].link_id = s.index
+      state.supplies[i] = state.chests[i].get_inventory(defines.inventory.chest)
+      assert(#state.supplies[i] == 48, 'Expected default 48-slot chest')
+    end
+  end
+  if config.scenario=='player_no_chest' then
+    -- on_player_created supplies the real character before the benchmark save.
+    return state
   end
   for i=1,config.entities do
     local pool = math.floor((i-1)/(config.entities/10))+1
     local j = (i-1)%(config.entities/10)
     local is_ammo = i%2==1
-    local entity = assert(state.chests[pool].surface.create_entity{
-      name=is_ammo and 'gun-turret' or 'stone-furnace', force='player',
+    local supplied = state.chests[pool] ~= nil and (config.scenario~='mixed_supply' or j%4<2)
+    state.supplied[i] = supplied
+    local entity = assert(state.surfaces[pool].create_entity{
+      name=is_ammo and 'gun-turret' or 'stone-furnace', force=(config.scenario=='mixed_supply' and j%4>=2) and absent or 'player',
       position={(j%100)*4,math.floor(j/100)*4}, raise_built=raise_built,
     })
     -- No enemies or smelting ingredients: consumption is controlled by resets.
@@ -52,7 +65,7 @@ function M.initial(scenario, i)
 end
 
 function M.supply(state, scenario)
-  for _,inv in ipairs(state.supplies) do
+  for _,inv in pairs(state.supplies) do
     inv.clear()
     if scenario~='no_supply' then
       local count = scenario=='depleted' and config.entities/40 or config.entities/20*10
@@ -66,7 +79,7 @@ function M.supply(state, scenario)
       end
       table.sort(names)
       for i=1,30 do assert(inv.insert{name=names[i],count=1} == 1) end
-    else
+    elseif scenario~='no_supply' then
       assert(inv.insert{name='iron-plate',count=100} == 100)
     end
   end
@@ -96,7 +109,7 @@ function M.validate(state, scenario)
   end
   for kind,name in ipairs({'firearm-magazine','coal'}) do
     local remaining = 0
-    for _,inv in ipairs(state.supplies) do remaining=remaining+inv.get_item_count(name) end
+    for _,inv in pairs(state.supplies) do remaining=remaining+inv.get_item_count(name) end
     local before = scenario=='no_supply' and 0 or
       (scenario=='depleted' and config.entities/4 or config.entities*5)
     assert(remaining+transferred[kind]==before, scenario..': conservation failed for '..name)

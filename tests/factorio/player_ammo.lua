@@ -50,7 +50,7 @@ script.on_event(defines.events.on_player_created, function(event)
   ammo.clear()
   player.cursor_stack.clear()
   check(guns[1].set_stack{name='pistol'}, 'equip pistol in first gun slot')
-  storage.fixture = {player=player, supply=supply, guns=guns, ammo=ammo,
+  storage.fixture = {player=player, chest=chest, supply=supply, guns=guns, ammo=ammo,
     start=game.tick, phase='initial'}
   log(PREFIX .. 'fixture ready')
 end)
@@ -105,9 +105,15 @@ script.on_event(defines.events.on_tick, function()
     check(not slot.valid_for_read, 'ammo refilled after gun removal')
     check(f.supply.get_item_count(AMMO) == 80, 'unarmed character consumed supply')
     if elapsed >= 120 then
-      f.phase = 'done'
       log(PREFIX .. 'PASS gun removal leaves ammo slot empty')
-      log(PREFIX .. 'SUCCESS')
+      check(f.guns[1].set_stack{name='pistol'}, 'rearm for last-chest mining')
+      check(f.player.mine_entity(f.chest,true), 'player mines last chest')
+      f.phase = 'mined'
     end
+  elseif f.phase == 'mined' then
+    check(not slot.valid_for_read, 'mined last chest must not refill ammo')
+    f.phase = 'done'
+    log(PREFIX .. 'PASS last chest player mining disables refill')
+    log(PREFIX .. 'SUCCESS')
   end
 end)

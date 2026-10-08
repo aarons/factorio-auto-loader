@@ -18,19 +18,24 @@ REPO = Path(__file__).resolve().parents[1]
 OLD = '8af5786eeb619b341df77e74effc4c4372705496'
 NEW = '19f9953889f965cb59d9be0ba93a02866eb41b45'
 SCENARIOS = ['full', 'active_10pct', 'mixed_half', 'partial', 'half', 'empty',
-             'no_supply', 'depleted', 'dense']
+             'no_supply', 'depleted', 'dense', 'no_chest', 'mixed_supply', 'player_no_chest']
 PREFIX = """local storage = {}
 local settings = {global={['auto-loader-entities-per-tick']={value=10}}}
 local noop = function() end
+local tick_handler
 local script = {on_init=noop,on_load=noop,on_configuration_changed=noop,
-  on_event=noop,register_on_object_destroyed=noop}
+  on_event=function(event,handler) if event==defines.events.on_tick then tick_handler=handler end end,
+  register_on_object_destroyed=function(entity) return entity.unit_number end}
 """
 SUFFIX = """
-return {tick=on_tick,setup=function(entities,chests,budget)
-  storage={fillables={},order={},cursor=1,reps={},representative_chests={},supply_candidates={}}
+return {tick=function() if tick_handler then tick_handler() end end,setup=function(entities,chests,budget)
+  storage={fillables={},order={},cursor=1,reps={},representative_chests={},supply_candidates={},
+    chest_buckets={},chest_records={},chest_destructions={},chest_count=0}
+  tick_handler=on_tick
   settings.global['auto-loader-entities-per-tick'].value=budget
   build_caches()
-  for _,chest in ipairs(chests) do link_chest(chest) end
+  if restore_tick_handler then restore_tick_handler() end
+  for _,chest in pairs(chests) do link_chest(chest) end
   for _,entity in ipairs(entities) do register_fillable(entity) end
 end}
 """
@@ -119,18 +124,52 @@ def summarize(root, config):
     print('\n'.join(lines))
 
 
+def prepare_player_save(command, mods, save, root, logfile, timeout):
+    """Create an actual LuaPlayer in a separate client, then benchmark its save."""
+    saves = root/'user/saves'
+    previous = {p: p.stat().st_mtime_ns for p in saves.glob('*benchmark-player*.zip')}
+    with logfile.open('w') as output:
+        process = subprocess.Popen(command+['--mod-directory',str(mods),'--load-game',str(save),
+            '--disable-audio','--window-size','800x600','--disable-migration-window',
+            '--force-graphics-preset','very-low'], stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic()+timeout
+            while time.monotonic()<deadline:
+                ready = [p for p in saves.glob('*benchmark-player*.zip')
+                         if p.stat().st_mtime_ns != previous.get(p)]
+                # Factorio writes .tmp first and renames the completed archive.
+                if ready:
+                    shutil.copy2(max(ready,key=lambda p:p.stat().st_mtime_ns), save)
+                    return
+                if process.poll() is not None:
+                    raise RuntimeError(f'Player fixture exited before saving; inspect {logfile}')
+                time.sleep(0.1)
+            raise RuntimeError(f'Player fixture timed out; inspect {logfile}')
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
 def production(args,root,config,revisions,info,builtins,command):
-    if any(s not in ['full','partial','half','empty','mixed_half','active_10pct'] for s in config['scenarios']):
-        raise ValueError('Production mode supports supplied scenarios only')
+    if any(s not in ['full','partial','half','empty','mixed_half','active_10pct','no_supply','no_chest','mixed_supply','player_no_chest'] for s in config['scenarios']):
+        raise ValueError('Production mode does not support depleted or dense scenarios')
     for budget in config['budgets']:
         for scenario in config['scenarios']:
             case = root/f'{budget}-{scenario}'
             case.mkdir()
-            actual_ticks = max(args.ticks,12*args.entities//budget)
-            case_config = dict(config,budget=budget,scenario=scenario,actual_ticks=actual_ticks)
+            entities = 1 if scenario == 'player_no_chest' else args.entities
+            case_budget = min(budget, entities)
+            actual_ticks = max(args.ticks,12*entities//case_budget)
+            case_config = dict(config,entities=entities,budget=case_budget,scenario=scenario,actual_ticks=actual_ticks)
             for label,rev in revisions.items():
                 mods = case/label
-                copy_revision(rev,mods/f"{info['name']}_{info['version']}")
+                revision_info = json.loads((rev / "info.json").read_text())
+                copy_revision(rev,mods/f"{revision_info['name']}_{revision_info['version']}")
                 fixture = mods/'refill-benchmark_0.1.0'
                 fixture.mkdir()
                 (fixture/'info.json').write_text(json.dumps(dict(name='refill-benchmark',version='0.1.0',
@@ -140,11 +179,13 @@ def production(args,root,config,revisions,info,builtins,command):
                     shutil.copy2(REPO/'benchmarks/factorio'/source,fixture/dest)
                 (fixture/'config.lua').write_text('return '+lua(case_config)+'\n')
                 (fixture/'settings-final-fixes.lua').write_text(
-                    f"data.raw['int-setting']['auto-loader-entities-per-tick'].default_value = {budget}\n")
+                    f"data.raw['int-setting']['auto-loader-entities-per-tick'].default_value = {case_budget}\n")
                 (mods/'mod-list.json').write_text(json.dumps({'mods':[dict(name=n,enabled=True)
                     for n in builtins+[info['name'],'refill-benchmark']]},indent=2))
                 run(command+['--mod-directory',str(mods),'--create',str(case/f'{label}.zip'),
                     '--map-gen-settings',str(root/'map.json')],case/f'create-{label}.log',args.timeout)
+                if scenario == 'player_no_chest':
+                    prepare_player_save(command,mods,case/f'{label}.zip',root,case/f'player-{label}.log',args.timeout)
             for sample in range(1,args.samples+1):
                 for label in (['old','new'] if sample%2 else ['new','old']):
                     logfile = case/f'{sample}-{label}.log'
@@ -173,14 +214,15 @@ def summarize_production(root,config):
                     header = next(line.split(',') for line in log.splitlines() if line.startswith('tick,'))
                     ticks = [dict(zip(header,line.split(','))) for line in log.splitlines()
                              if re.match(r'^t\d+,',line)]
-                    actual_ticks = max(config['ticks'],12*config['entities']//budget)
+                    entities = 1 if scenario == 'player_no_chest' else config['entities']
+                    actual_ticks = max(config['ticks'],12*entities//min(budget,entities))
                     assert len(ticks)==actual_ticks
                     total = sum(int(t['wholeUpdate']) for t in ticks)/1e6
                     reported = float(re.search(r'updates in ([\d.]+) ms',log).group(1))
                     # The outer benchmark timer also includes dispatch overhead.
                     assert abs(total/reported-1)<0.01, 'Verbose timing units or parsing mismatch'
                     # Drop two complete sweeps or 60 ticks, whichever is longer.
-                    warmup = max(60,2*config['entities']//budget)
+                    warmup = max(60,2*entities//min(budget,entities))
                     ticks = ticks[warmup:]
                     assert ticks, 'No samples after warmup'
                     row = dict(budget=budget,scenario=scenario,sample=sample,version=version,
@@ -225,7 +267,9 @@ def main():
     if args.entities!=10000 or any(b<1 or b>10000 or args.entities%b for b in args.budgets):
         parser.error('This fixture uses exactly 10,000 entities; budgets must divide 10,000 and be in 1..10,000')
     if args.scenarios is None:
-        args.scenarios = ['full','partial','empty'] if args.mode=='production' else SCENARIOS
+        args.scenarios = ['full','partial','empty'] if args.mode=='production' else SCENARIOS[:-3]
+    if args.mode == 'callback' and any(s in ['no_chest','mixed_supply','player_no_chest'] for s in args.scenarios):
+        parser.error('Membership scenarios require production mode to measure actual event scheduling')
     if args.samples<1 or args.iterations<1:
         parser.error('Samples and iterations must be positive')
     executable = find_factorio(args.factorio)

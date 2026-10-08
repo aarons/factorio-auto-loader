@@ -4,39 +4,35 @@ On 2026-10-07, a new playthrough showed unexpectedly high Auto-Loader script tim
 with no Auto-Loader chests built: `mod-auto-loader-chest: 2.185/0.845/4.031`.
 The cause is unknown; the save and active settings have not been examined.
 
-A review of v1.2.1 (`00c3840`) identified the following priorities in
-[control.lua](control.lua). Their performance impact has not been measured.
+Repeated chest discovery was addressed in v1.2.2: chest membership now gates
+supply, refill processing uses direct linked-inventory access, and the refill
+tick handler is disabled when no chests exist anywhere. See the
+[membership benchmark report](documentation/BENCHMARK_RESULTS_2026-10-07_MEMBERSHIP.md)
+for measurements and validation limits. The original player save has not been
+examined, so its specific reported cost remains unverified.
 
-## 1. Repeated unsuccessful chest discovery
+The remaining priorities in [control.lua](control.lua) are below.
 
-`representative_chest()` searches the surface when it has no valid cached chest.
-Successful searches are remembered, but missing chests are rediscovered on each
-tick that needs supply. One consumer with unmet demand can trigger 60 failed
-searches per second at 60 UPS. The query has no area restriction.
+## 1. Scheduling consumers without a supply chest
 
-This is the leading hypothesis for the no-chest report. Avoiding repeated failed
-searches could reduce idle cost; chest availability can change as chests are
-built, removed, moved, or assigned to another force.
+Consumers on all surfaces and forces still share one global round-robin queue.
+When at least one chest exists, each visited consumer's current surface and force
+are checked for supply membership. Unsupplied consumers skip inventory checks,
+but their visits still consume the per-tick budget and delay supplied consumers.
 
-The existing benchmark's `no_supply` scenario has chests without matching supply,
-so it does not exercise this case. The missing-chest assertions in [tests/supply.lua](tests/supply.lua)
-describe the current repeated searches rather than a required behavior.
-
-## 2. Polling consumers without a supply chest
-
-Consumers are registered regardless of chest availability. Refill checks inspect
-inventories, shortages, and item categories before discovering that there is no
-supply chest. Character checks also inspect guns, cursor contents, and settings.
-
-The player's character alone keeps this work active. With ten or fewer consumers
-and the default budget of ten, every consumer can be checked every tick. This
-cost remains even if repeated chest searches are eliminated.
+Replace the global processing queue with scheduling for supplied surface/force
+buckets. Keep unsupplied consumers registered so building a first chest does not
+require rediscovery. Activation and deactivation must handle chest lifecycle
+changes, and consumer routing must remain correct when entities change surfaces
+or forces. Preserve fairness and a bounded amount of work per tick, including
+cleanup of stale entries.
 
 An absent chest and an empty chest are different cases: an empty chest can be
-restocked without a build event. Worlds can also have a mixture of supplied and
-unsupplied surfaces and forces.
+restocked without a build event and must remain scheduled. Benchmark mixed
+supplied/unsupplied worlds and already-full consumers; the current early gate
+adds overhead for consumers that would otherwise return before looking up supply.
 
-## 3. Supply snapshots and candidate scans
+## 2. Supply snapshots and candidate scans
 
 When supply is needed, `get_pool()` reads the chest inventory and builds item
 records. Refill functions search those records for compatible supply, and
@@ -53,7 +49,5 @@ locomotives, and diverse fuel/ammo quality combinations are coverage gaps.
 
 - The processing budget limits consumers visited per tick. A larger registry can
   therefore increase refill delay without a proportional increase in tick cost.
-- Stale registry entries do not consume that budget, so cleanup after mass
-  destruction or surface deletion can traverse much of the registry in one tick.
 - Build and clone handlers inspect unrelated entities before rejecting them,
   potentially adding overhead during large construction bursts.

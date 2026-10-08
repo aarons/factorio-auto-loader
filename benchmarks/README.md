@@ -1,5 +1,9 @@
 # Refill benchmarks with 10,000 entities
 
+The [chest membership report](../documentation/BENCHMARK_RESULTS_2026-10-07_MEMBERSHIP.md)
+compares the new registry against the pre-change implementation, including true
+no-chest worlds and mixed supplied/unsupplied consumers.
+
 See the [September 9, 2026 results](../documentation/BENCHMARK_RESULTS_2026-09-09.md)
 for the comparison of the batched and immediate-transfer implementations.
 The [ledger follow-up](../documentation/BENCHMARK_RESULTS_2026-09-09_LEDGER.md)
@@ -35,7 +39,7 @@ The exported
 local function wrapper is specific to these implementations and must be reviewed
 when testing future code.
 
-Every pass visits all **10,000 real entities**, consisting of 5,000 gun turrets
+In standard scenarios, every pass visits all **10,000 real entities**, consisting of 5,000 gun turrets
 and 5,000 stone furnaces. Per-tick budgets of 10, 100, 1,000, and 10,000 mean that
 a pass takes 1,000, 100, 10, or 1 callbacks. There are ten surfaces, each with
 1,000 consumers and one default 48-slot, 10× compressed supply chest. A single
@@ -147,9 +151,9 @@ extended measurements for that budget.
 
 ## Scope
 
-This compares the commits as a whole, including discovery, caching, transfers,
+The standard matrix compares the commits as a whole, including discovery, caching, transfers,
 and bookkeeping; it does not isolate the cost of one API method. It covers
-turret ammo and generic burner fuel. It does not measure characters, trains,
+turret ammo and generic burner fuel. Apart from the optional player-only idle scenario below, it does not measure characters, trains,
 quality mixtures, rejected insertion/refunds, save migration, multiplayer, or
 real combat. A player's representative save remains necessary to quantify
 their actual UPS change. Correctness fixes in the new commit should be considered
@@ -157,3 +161,43 @@ separately from any performance decision.
 
 See [the original benchmarking guide](../documentation/BENCHMARKING.md) for
 API and CLI background.
+
+## Chest membership scenarios
+
+Compare the pre-membership revision with the working tree using production mode:
+
+```sh
+python3 benchmarks/run.py --mode production --old HEAD --new WORKTREE \
+  --output benchmarks/artifacts/membership \
+  --scenarios no_chest mixed_supply no_supply partial \
+  --budgets 1000 --ticks 1200 --samples 6
+```
+
+Use the pre-change commit instead of `HEAD` once these changes are committed.
+The additional scenarios require production mode so conditional `on_tick`
+registration and load restoration run normally:
+
+- `no_chest`: 10,000 consumers at 9, across ten surfaces, with zero chests.
+- `mixed_supply`: five surfaces have a player-force chest and five have no
+  chests. Half the consumers on every surface belong to a friendly force with
+  no chest. The 2,500 supplied consumers refill to 10; 7,500 stay at 9.
+- `player_no_chest`: one actual player with a pistol and 9 magazines, no
+  chests, and no other consumers. The runner opens a separate graphical client
+  to create that player and an isolated autosave, then uses normal advancing-tick
+  benchmarks on the save. This requires a working graphical client. Its effective
+  budget is 1 regardless of the selected matrix budget.
+
+`no_supply` now also works in production mode and leaves existing chests
+completely empty (including no iron plates). `partial` provides active supply as a comparison. All assertions
+run after every production tick, including unchanged unsupplied consumer counts
+and exact supplied-pool debits. Mixed forces are friends to prevent combat from
+changing demand. Callback wrappers understand the new membership storage and
+conditional tick subscription; the historical callback scenario matrix remains
+available.
+
+Run benchmark processes sequentially. Production `scriptUpdate` includes the
+fixture's inventory checks and resets; a disabled Auto-Loader handler does not
+make that combined counter zero. Use per-run measurements and report this scope
+when discussing improvements. `production-results.json` contains script timing
+as well as whole-update timing. The player-only scenario and older graphical
+player tests cannot run if Steam fails to launch its graphical client.

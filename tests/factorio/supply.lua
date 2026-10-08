@@ -31,7 +31,7 @@ script.on_init(function()
       local amount = s*2+f
       check(supply.insert{name=AMMO,quality=quality,count=amount}==amount,'stock pool')
       check(count(linked.get_inventory(defines.inventory.chest),AMMO,quality)==amount,'linked pool')
-      -- Force rediscovery through the remaining representative after save/load.
+      -- Remove one registered member before save/load; the surviving chest supplies.
       linked.destroy()
       local consumers={}
       for n=1,2 do

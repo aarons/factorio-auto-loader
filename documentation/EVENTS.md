@@ -1,44 +1,38 @@
-# Event exploration notes
+# Runtime events
 
-Candidate signals collected while exploring refill scheduling. These groupings
-are possibilities, not a description of the current handlers; those live in
-`control.lua`.
+Chest membership is keyed by surface and force. Every chest has a reverse record
+with its entity, unit number, destruction registration number, and recorded keys.
+Duplicate registration/removal is harmless. Consumers remain registered even on
+surfaces without supply, so adding a first chest needs no consumer rescan.
 
-## Entity discovery
+| Event | Handling |
+| --- | --- |
+| `on_built_entity`, `on_robot_built_entity`, `on_space_platform_built_entity`, `script_raised_built`, `script_raised_revive` | Link/register `entity`, or register a consumer. |
+| `on_entity_cloned` | Link/register `destination`; area cloning emits individual entity events too. |
+| `on_player_mined_entity`, `on_robot_mined_entity`, `on_space_platform_mined_entity`, `on_entity_died`, `script_raised_destroy` | Remove chest membership immediately using the still-valid entity. |
+| `on_object_destroyed` | Idempotent chest removal by registration number; consumer cleanup by useful ID. |
+| `on_surface_cleared`, `on_surface_deleted` | Drop recorded memberships by `surface_index`; later destruction notifications are harmless. |
+| `on_forces_merged` | Re-register known source members under their current destination force; source force is already invalid. |
+| `on_surface_imported` | Resolve `game.surfaces[event.surface_index]`; scan once for chests and consumers. |
+| `on_player_created`, `on_player_respawned` | Register the player's current character. |
+| Initialization/configuration change | Rebuild chest membership from one chest scan per surface; register consumers and discard legacy supply caches. |
+| Save loading | Rebuild local prototype caches and restore conditional tick subscription using storage reads only. |
+| `on_tick` | Bounded consumer visits and batched transfers; registered only while at least one chest is recorded. |
 
-`on_area_cloned`, `on_built_entity`, `on_entity_cloned`, `on_entity_spawned`,
-`on_robot_built_entity`, `on_space_platform_built_entity`, `on_surface_imported`,
-`on_train_created`, `script_raised_built`, `script_raised_revive`.
+Destruction notifications arrive at the end of the current or next tick. Before
+a bucket authorizes supply, its known entity references are validated once for
+that tick and invalid members are removed. There is no world search or
+representative-chest selection. Marking a chest for deconstruction leaves it
+active until removal. Surface clearing/deletion can complete after the requesting
+handler returns; fixtures wait before rebuilding on a cleared surface.
 
-## Player interest and inventory changes
+The supported contract covers normal lifecycle operations and scripts raising
+appropriate events. Silent creation, force reassignment, and link-ID mutation
+by other mods are not discovery mechanisms. There is no periodic reconciliation
+scan or general entity-force-change event. Registered silent destruction still
+has the object-destruction backstop.
 
-`on_gui_hover`, `on_gui_opened`, `on_player_ammo_inventory_changed`,
-`on_player_armor_inventory_changed`, `on_player_gun_inventory_changed`,
-`on_player_placed_equipment`, `on_equipment_inserted`, `on_equipment_removed`.
-
-Gun inventory changes could indicate that a character needs different ammo.
-
-## Deconstruction and removal
-
-`on_cancelled_deconstruction`, `on_cancelled_upgrade`,
-`on_marked_for_deconstruction`, `on_marked_for_upgrade`,
-`on_player_deconstructed_area`, `on_space_platform_mined_entity`,
-`on_surface_cleared`, `on_surface_deleted`, `script_raised_destroy`.
-
-## Combat and activity
-
-`on_entity_damaged`, `on_object_destroyed`, `on_segmented_unit_damaged`,
-`on_trigger_fired_artillery`, `on_worker_robot_expired`,
-`script_raised_destroy_segmented_unit`, `on_train_changed_state`.
-
-Nearby combat or destruction could suggest which consumers need attention.
-Other leads include character/turret `in_combat` state and turret
-`alert_when_attacking` behavior.
-
-## Other leads
-
-`on_land_mine_armed`, `on_lua_shortcut`, `on_mod_item_opened`,
-`on_player_changed_force`, `on_player_repaired_entity`, `on_pre_build`,
-`on_resource_depleted`.
-
-A shortcut could offer manual refill checks or an enable/disable control.
+API references: [events](https://lua-api.factorio.com/latest/events.html),
+[object registration](https://lua-api.factorio.com/latest/classes/LuaBootstrap.html#register_on_object_destroyed),
+[load contract](https://lua-api.factorio.com/latest/classes/LuaBootstrap.html#on_load).
+Runtime tests use Factorio 2.1.21; the mod minimum remains 2.1.20.

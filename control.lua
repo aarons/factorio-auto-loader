@@ -76,19 +76,71 @@ local function build_caches()
 end
 
 ----------------------------------------------------------------------
--- Supply half: per-surface linking + representative chest tracking.
+-- Supply half: physical chest membership, independent of linked inventories.
 ----------------------------------------------------------------------
+
+-- Forward declaration: chest transitions control the refill subscription.
+local on_tick
+
+local function restore_tick_handler()
+  script.on_event(defines.events.on_tick, (storage.chest_count or 0) > 0 and on_tick or nil)
+end
+
+local function remove_chest(unit_number)
+  local record = storage.chest_records[unit_number]
+  if not record then return end
+  local surfaces = storage.chest_buckets[record.surface_index]
+  local bucket = surfaces[record.force_index]
+  bucket.members[unit_number] = nil
+  bucket.count = bucket.count - 1
+  if bucket.count == 0 then surfaces[record.force_index] = nil end
+  if next(surfaces) == nil then storage.chest_buckets[record.surface_index] = nil end
+  storage.chest_records[unit_number] = nil
+  storage.chest_destructions[record.registration_number] = nil
+  storage.chest_count = storage.chest_count - 1
+  if storage.chest_count == 0 then restore_tick_handler() end
+end
 
 local function link_chest(entity)
   if not (entity and entity.valid and entity.name == CHEST) then return end
-  entity.link_id = entity.surface.index
-  -- Remember one chest per surface and force as the pool handle. Validity is
-  -- re-checked on use, so caching a chest that later gets mined is harmless.
-  if storage.representative_chests then
-    local surface_index, force_index = entity.surface.index, entity.force.index
-    storage.representative_chests[surface_index] = storage.representative_chests[surface_index] or {}
-    storage.representative_chests[surface_index][force_index] = entity
+  local unit_number = entity.unit_number
+  if not unit_number or storage.chest_records[unit_number] then return end
+  local surface_index, force_index = entity.surface.index, entity.force.index
+  entity.link_id = surface_index
+  local surfaces = storage.chest_buckets[surface_index]
+  if not surfaces then surfaces = {}; storage.chest_buckets[surface_index] = surfaces end
+  local bucket = surfaces[force_index]
+  if not bucket then bucket = {count = 0, members = {}}; surfaces[force_index] = bucket end
+  local registration_number = script.register_on_object_destroyed(entity)
+  local record = {entity = entity, unit_number = unit_number,
+    registration_number = registration_number, surface_index = surface_index, force_index = force_index}
+  bucket.members[unit_number] = true
+  bucket.count = bucket.count + 1
+  storage.chest_records[unit_number] = record
+  storage.chest_destructions[registration_number] = unit_number
+  storage.chest_count = storage.chest_count + 1
+  if storage.chest_count == 1 then restore_tick_handler() end
+end
+
+-- Validate known membership once per visited bucket per tick. Destruction
+-- notifications can arrive next tick; invalid members must not enable a pool
+-- whose linked inventory outlives its final physical chest. No world searches
+-- or representative selection are needed, and contents remain demand-driven.
+local function eligible_pool(surface_index, force, pools)
+  local force_index = force.index
+  pools[surface_index] = pools[surface_index] or {}
+  local cached = pools[surface_index][force_index]
+  if cached ~= nil then return cached or nil end
+  local surfaces = storage.chest_buckets[surface_index]
+  local bucket = surfaces and surfaces[force_index]
+  if bucket then
+    for unit_number in pairs(bucket.members) do
+      if not storage.chest_records[unit_number].entity.valid then remove_chest(unit_number) end
+    end
   end
+  local pool = bucket and bucket.count > 0 and {surface_index = surface_index, force = force} or false
+  pools[surface_index][force_index] = pool
+  return pool or nil
 end
 
 ----------------------------------------------------------------------
@@ -138,6 +190,8 @@ local function on_built(event)
 end
 
 local function on_object_destroyed(event)
+  local chest_unit = storage.chest_destructions[event.registration_number]
+  if chest_unit then remove_chest(chest_unit) end
   -- For entities useful_id is the unit_number. The sweep swap-pops the stale
   -- slot out of the order array when it next reaches it.
   local unit_number = event.useful_id
@@ -148,32 +202,14 @@ end
 -- Pool access: demand-driven per-tick ledgers, with debits after the sweep.
 ----------------------------------------------------------------------
 
-local function representative_chest(surface_index, force)
-  local representative_chests = storage.representative_chests[surface_index]
-  if not representative_chests then representative_chests = {}; storage.representative_chests[surface_index] = representative_chests end
-  local chest = representative_chests[force.index]
-  if chest and chest.valid and chest.name == CHEST
-      and chest.surface.index == surface_index and chest.force.index == force.index
-      and chest.link_id == surface_index then return chest end
-  local surface = game.surfaces[surface_index]
-  if not surface then return nil end
-  chest = surface.find_entities_filtered{ name = CHEST, force = force, limit = 1 }[1]
-  if chest then link_chest(chest) end
-  representative_chests[force.index] = chest
-  return chest
-end
-
 local function get_pool(surface_index, force, pools)
-  local force_index = force.index
-  pools[surface_index] = pools[surface_index] or {}
-  local cached = pools[surface_index][force_index]
-  if cached ~= nil then return cached or nil end
+  local pool = eligible_pool(surface_index, force, pools)
+  if not pool then return nil end
+  if pool.items then return pool end
+  local inventory = force.get_linked_inventory(CHEST, surface_index)
+  if not (inventory and inventory.valid) then pools[surface_index][force.index] = false; return nil end
 
-  local chest = representative_chest(surface_index, force)
-  local inventory = chest and chest.get_inventory(defines.inventory.chest)
-  if not inventory then pools[surface_index][force_index] = false; return nil end
-
-  local pool = { inventory = inventory, available = {}, items = {}, fuels = {}, ammos = {} }
+  pool.inventory, pool.available, pool.items, pool.fuels, pool.ammos = inventory, {}, {}, {}, {}
   for _, contents in pairs(inventory.get_contents()) do
     local name, quality = contents.name, contents.quality
     if ITEM_FUEL[name] or ITEM_AMMO[name] then
@@ -186,8 +222,15 @@ local function get_pool(surface_index, force, pools)
       if ITEM_AMMO[name] then pool.ammos[#pool.ammos + 1] = item end
     end
   end
-  pools[surface_index][force_index] = pool
+  pools[surface_index][force.index] = pool
   return pool
+end
+
+-- The eligibility gate already read the consumer's location. Reuse that key
+-- when demand appears instead of crossing the entity API boundary again.
+local function entity_pool(entity, pools, eligible)
+  if eligible then return get_pool(eligible.surface_index, eligible.force, pools) end
+  return get_pool(entity.surface.index, entity.force, pools)
 end
 
 local function pool_item(pool, name, quality)
@@ -204,7 +247,7 @@ local function debit_pools(pools)
   -- No other event handler runs between our snapshot and these debits.
   for _, forces in pairs(pools) do
     for _, pool in pairs(forces) do
-      if pool then
+      if pool and pool.inventory then
         for _, item in ipairs(pool.items) do
           if item.consumed > 0 then
             pool.inventory.remove{ name = item.name, quality = item.quality, count = item.consumed }
@@ -238,14 +281,14 @@ end
 
 -- Occupied slots only accept their exact item/quality. Empty slots additionally
 -- validate their filters before removing anything from supply.
-local function fill_slot(slot, accepted_categories, target_count, entity, pools, item_kind, item_categories)
+local function fill_slot(slot, accepted_categories, target_count, entity, pools, item_kind, item_categories, eligible)
   if not slot then return end
   if slot.valid_for_read then
     local name = slot.name
     if not accepts_category(accepted_categories, item_categories[name]) then return end
     local gap = math.min(target_count, prototypes.item[name].stack_size) - slot.count
     if gap <= 0 then return end
-    local pool = get_pool(entity.surface.index, entity.force, pools)
+    local pool = entity_pool(entity, pools, eligible)
     local item = pool and pool_item(pool, name, slot.quality.name)
     if item and item.count > 0 then
       local before = slot.count
@@ -254,7 +297,7 @@ local function fill_slot(slot, accepted_categories, target_count, entity, pools,
     end
     return -- another item cannot go into this occupied slot
   end
-  local pool = get_pool(entity.surface.index, entity.force, pools)
+  local pool = entity_pool(entity, pools, eligible)
   if not pool then return end
   for _, item in ipairs(pool[item_kind]) do
     if item.count > 0 and accepts_category(accepted_categories, item_categories[item.name]) then
@@ -272,7 +315,7 @@ end
 
 -- Character ammo slots pair 1:1 with gun slots, so each slot is topped up
 -- independently with ammo its own gun can fire. Slots with no gun get nothing.
-local function fill_character_ammo(entry, entity, pools)
+local function fill_character_ammo(entry, entity, pools, eligible)
   local guns = entity.get_inventory(defines.inventory.character_guns)
   local inventory = entity.get_inventory(entry.ammo_define)
   if not (guns and inventory) then return end
@@ -297,7 +340,7 @@ local function fill_character_ammo(entry, entity, pools)
       if accepted_categories then
         local accepted = {}
         for _, category in ipairs(accepted_categories) do accepted[category] = true end
-        fill_slot(slot, accepted, entry.ammo_target, entity, pools, "ammos", ITEM_AMMO)
+        fill_slot(slot, accepted, entry.ammo_target, entity, pools, "ammos", ITEM_AMMO, eligible)
       end
     end
   end
@@ -305,7 +348,7 @@ end
 
 -- Prefer existing eligible stacks, then other supplied identities. A successful
 -- partial fill is enough for this sweep, preserving existing refill behavior.
-local function fill_inventory(inventory, target_count, entity, pools, item_kind, item_categories, accepted_categories)
+local function fill_inventory(inventory, target_count, entity, pools, item_kind, item_categories, accepted_categories, eligible)
   local current = 0
   local preferred_slot, preferred_name, preferred_index
   for slot_index = 1, #inventory do
@@ -323,7 +366,7 @@ local function fill_inventory(inventory, target_count, entity, pools, item_kind,
   end
   local budget = target_count - current
   if budget <= 0 then return end
-  local pool = get_pool(entity.surface.index, entity.force, pools)
+  local pool = entity_pool(entity, pools, eligible)
   if not pool or #pool[item_kind] == 0 then return end
   local rejected
   if preferred_slot then
@@ -353,41 +396,43 @@ local function fill_inventory(inventory, target_count, entity, pools, item_kind,
   end
 end
 
-local function fill_ammo(entry, entity, pools)
+local function fill_ammo(entry, entity, pools, eligible)
   if entry.type == "character" then
-    fill_character_ammo(entry, entity, pools)
+    fill_character_ammo(entry, entity, pools, eligible)
     return
   end
   local inventory = entity.get_inventory(entry.ammo_define)
-  if inventory then fill_inventory(inventory, entry.ammo_target, entity, pools, "ammos", ITEM_AMMO) end
+  if inventory then fill_inventory(inventory, entry.ammo_target, entity, pools, "ammos", ITEM_AMMO, nil, eligible) end
 end
 
-local function fill_fuel(entry, entity, pools)
+local function fill_fuel(entry, entity, pools, eligible)
   local inventory = entity.get_fuel_inventory()
   local burner = entity.burner
   local accepted_categories = burner and burner.fuel_categories
   if not (inventory and accepted_categories) then return end
   if entry.is_locomotive then
     -- Trains keep one full stack, without hoarding across all three slots.
-    fill_slot(inventory[1], accepted_categories, math.huge, entity, pools, "fuels", ITEM_FUEL)
+    fill_slot(inventory[1], accepted_categories, math.huge, entity, pools, "fuels", ITEM_FUEL, eligible)
   else
-    fill_inventory(inventory, FUEL_TARGET, entity, pools, "fuels", ITEM_FUEL, accepted_categories)
+    fill_inventory(inventory, FUEL_TARGET, entity, pools, "fuels", ITEM_FUEL, accepted_categories, eligible)
   end
 end
 
 local function fill_entity(entry, pools)
   local entity = entry.entity
+  local eligible = eligible_pool(entity.surface.index, entity.force, pools)
+  if not eligible then return end
   if entity.to_be_deconstructed() then return end
 
-  if entry.ammo_define then fill_ammo(entry, entity, pools) end
-  if entry.fuel then fill_fuel(entry, entity, pools) end
+  if entry.ammo_define then fill_ammo(entry, entity, pools, eligible) end
+  if entry.fuel then fill_fuel(entry, entity, pools, eligible) end
 end
 
 ----------------------------------------------------------------------
 -- The bounded round-robin sweep.
 ----------------------------------------------------------------------
 
-local function on_tick()
+on_tick = function()
   local order = storage.order
   if not order then return end
   local entity_count = #order
@@ -399,12 +444,12 @@ local function on_tick()
 
   local cursor = storage.cursor
   local pools = {}
-  local filled, steps = 0, 0
+  local steps = 0
 
   -- steps < entity_count bounds the scan; the cursor persists across ticks for fair
   -- round-robin. entity_count is the pre-sweep length, so swap-pops this tick may leave
   -- nils in the tail slots [#order+1, entity_count] which we simply skip.
-  while filled < entities_per_tick and steps < entity_count do
+  while steps < entities_per_tick and steps < entity_count do
     steps = steps + 1
     if cursor > entity_count then cursor = 1 end
     local order_index = cursor
@@ -414,7 +459,6 @@ local function on_tick()
       local entry = fillables[unit_number]
       if entry and entry.entity.valid then
         fill_entity(entry, pools)
-        filled = filled + 1
       else
         -- Dead entry: swap the tail into this slot and pop. O(1), keeps the
         -- array dense. We don't revisit order_index this cycle (skipping one entity on
@@ -439,8 +483,11 @@ local function initialize()
   storage.fillables = storage.fillables or {}
   storage.order = storage.order or {}
   storage.cursor = storage.cursor or 1
-  -- Rebuild the old surface-only representative map on upgrades too.
-  storage.representative_chests = {}
+  storage.chest_buckets = {}
+  storage.chest_records = {}
+  storage.chest_destructions = {}
+  storage.chest_count = 0
+  storage.representative_chests = nil -- discard the previous representative cache
   storage.supply_candidates = nil -- discard the previous engine's persistent cache on upgrade
 
   for _, surface in pairs(game.surfaces) do
@@ -454,18 +501,21 @@ local function initialize()
   for _, player in pairs(game.players) do
     if player.character then register_fillable(player.character) end
   end
+  restore_tick_handler()
 end
 
 script.on_init(initialize)
 script.on_configuration_changed(initialize)
-script.on_load(build_caches)
+script.on_load(function()
+  build_caches()
+  restore_tick_handler() -- storage reads only; no game access or world scan
+end)
 
 for _, event in ipairs(BUILD_EVENTS) do
   script.on_event(event, on_built)
 end
 script.on_event(defines.events.on_entity_cloned, on_built)
 script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
-script.on_event(defines.events.on_tick, on_tick)
 
 local function on_player_character(event)
   local player = game.get_player(event.player_index)
@@ -474,22 +524,44 @@ end
 script.on_event(defines.events.on_player_created, on_player_character)
 script.on_event(defines.events.on_player_respawned, on_player_character)
 
--- Rescan a region (or whole surface, area = nil) after a clone/import: relink
--- chests and register any fillables. Both calls are idempotent.
-local function rescan_area(surface, area)
-  for _, chest in ipairs(surface.find_entities_filtered{ area = area, name = CHEST }) do
-    link_chest(chest)
-  end
-  for _, entity in ipairs(surface.find_entities_filtered{ area = area, type = FILLABLE_TYPES }) do
-    register_fillable(entity)
-  end
+-- Entity clone events register both chests and consumers individually. Import
+-- does not promise those events, so bootstrap the imported surface once.
+script.on_event(defines.events.on_surface_imported, function(event)
+  local surface = game.surfaces[event.surface_index]
+  if not surface then return end
+  for _, chest in ipairs(surface.find_entities_filtered{ name = CHEST }) do link_chest(chest) end
+  for _, entity in ipairs(surface.find_entities_filtered{ type = FILLABLE_TYPES }) do register_fillable(entity) end
+end)
+
+local function on_chest_removed(event)
+  local entity = event.entity
+  if entity and entity.valid and entity.name == CHEST then remove_chest(entity.unit_number) end
+end
+for _, event in ipairs({defines.events.on_player_mined_entity, defines.events.on_robot_mined_entity,
+    defines.events.on_space_platform_mined_entity, defines.events.on_entity_died,
+    defines.events.script_raised_destroy}) do
+  script.on_event(event, on_chest_removed)
 end
 
-script.on_event(defines.events.on_area_cloned, function(event)
-  if event.clone_entities then
-    rescan_area(event.destination_surface, event.destination_area)
+local function on_surface_removed(event)
+  local surfaces = storage.chest_buckets[event.surface_index]
+  if not surfaces then return end
+  for _, bucket in pairs(surfaces) do
+    for unit_number in pairs(bucket.members) do remove_chest(unit_number) end
   end
-end)
-script.on_event(defines.events.on_surface_imported, function(event)
-  rescan_area(event.surface, nil)
+end
+script.on_event(defines.events.on_surface_cleared, on_surface_removed)
+script.on_event(defines.events.on_surface_deleted, on_surface_removed)
+
+script.on_event(defines.events.on_forces_merged, function(event)
+  -- The source force is already gone; recorded keys remain safe to read.
+  local members = {}
+  for unit_number, record in pairs(storage.chest_records) do
+    if record.force_index == event.source_index then members[#members + 1] = unit_number end
+  end
+  for _, unit_number in ipairs(members) do
+    local entity = storage.chest_records[unit_number].entity
+    remove_chest(unit_number)
+    if entity.valid then link_chest(entity) end
+  end
 end)
