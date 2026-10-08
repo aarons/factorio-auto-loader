@@ -1,4 +1,17 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.2.3
+Date: 2026-10-07
+  Optimizations:
+    - Sweep only surface/force consumer buckets with supply chests; dormant consumers use no refill slots.
+    - Check consumer demand before resolving chest membership or supply, reducing full-inventory overhead.
+    - Stop chest validation after finding one live linked chest.
+  Changes:
+    - Traverse active consumer groups with one shared cursor.
+    - Rebuild consumer queues on upgrade while preserving player ammo delays.
+    - Reroute consumers on player surface/force changes, raised teleports, and force merges.
+    - Remove destroyed consumers from active and dormant queues immediately.
+    - Add configurable many-chests-per-bucket benchmarks and routing regression coverage.
+---------------------------------------------------------------------------------------------------
 Version: 1.2.2
 Date: 2026-10-07
   Optimizations:

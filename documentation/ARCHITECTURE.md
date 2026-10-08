@@ -22,19 +22,37 @@ The current implementation maintains a registry of ammo consumers and burners,
 populated by initialization scans and build/clone events. Destruction events and
 cleanup during processing remove stale entries.
 
-A round-robin sweep checks a configurable number of consumers each tick
-(`auto-loader-entities-per-tick`, default 10). Polling provides refill checks
-without relying on a general ammo or fuel consumption event. Unsupplied and
-stale entries count toward the visit budget. Each consumer uses its current
-surface and force, including mobile consumers.
+Consumers are stored in separate surface/force buckets. A compact list contains
+only nonempty buckets with chest membership; dormant consumers consume no refill
+slots and are never polled. Adding the first chest activates an existing bucket
+without a rescan. Removing the last chest deactivates it. Destruction events
+remove consumers from either active or dormant buckets immediately. Activation
+appends to the active-group array in constant time. Deactivation shifts subsequent
+active-group indices, taking time proportional to active groups, not consumers.
 
-Bucket eligibility is checked before consumer inventories, burners, or player
-settings. Known chest references are validated once per visited bucket per tick
-to cover delayed destruction notifications. This costs O(chests in visited
-buckets), without retaining a representative. With no chests anywhere, the tick
-handler is unregistered; the first registered chest restores it. Empty chests
-stay active so ordinary restocking is detected. On load, subscription is restored
-from the persisted total without modifying storage or accessing `game`.
+A round-robin sweep checks at most `auto-loader-entities-per-tick` consumers
+(default 10), and at most the active consumer count. One persisted traversal
+position holds the active bucket index and consumer index; completing a group advances that position to the next active bucket.
+Groups have no individual cursors. Reactivated groups start at their first
+consumer. Removing an earlier group preserves the current consumer position.
+The sweep remains fair across differently sized groups. Invalid consumers encountered
+before their destruction notification consume one bounded visit and are removed.
+Full consumers still need demand polling, but return before location reads,
+chest validation, or supply resolution. There is no general consumption event.
+
+When demand exists, known chest references are checked once per bucket per tick.
+Invalid records are pruned until the first live chest, then validation stops.
+With live members this needs one validity check, regardless of bucket size;
+a run of invalid members can still require multiple checks. Destruction events
+clean up unvisited invalid records. No world searches occur during refills.
+With no chests anywhere, the tick handler is unregistered; the first registered
+chest restores it. Empty chests remain active for eventless restocking. On load,
+subscription is restored with storage reads only and without accessing `game`.
+
+Player surface/force changes, explicitly raised teleports, and force merges
+reroute consumers even while refill ticks are disabled. Other mods must raise
+teleport events; silent force/surface mutation cannot activate a dormant bucket.
+Configuration changes rebuild routing while preserving character refill delays.
 
 When a consumer needs supply, the engine reads the shared inventory. A Lua ledger
 caches direct inventory lookups (including nil) per surface/force for the tick,
@@ -42,7 +60,9 @@ tracks available items and accepted transfers, and supply item removals are batc
 at the end of the sweep. The [ledger benchmark report](BENCHMARK_RESULTS_2026-09-09_LEDGER.md)
 documents the earlier supply-batching comparison. The
 [membership report](BENCHMARK_RESULTS_2026-10-07_MEMBERSHIP.md) measures the
-current discovery and scheduling change.
+previous discovery and scheduling change. The
+[supplied-queue report](BENCHMARK_RESULTS_2026-10-07_QUEUES.md) compares this follow-up
+against that implementation.
 
 ## Refill behavior
 

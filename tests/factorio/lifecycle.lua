@@ -117,6 +117,33 @@ script.on_event(defines.events.on_tick,function()
     stock(chest)
   elseif step==18 then
     check(storage.cloned.get_item_count(AMMO)==10,'area cloned consumer registered without rescan')
-    log('AUTO_LOADER_TEST SUCCESS no-chest load, build, entity/area clone, removal, death, merge, restock, clear and delete')
+    storage.dormant=surface('lifecycle-dormant')
+    storage.car=create(storage.dormant,'car',0)
+    storage.car_ammo=storage.car.get_inventory(defines.inventory.car_ammo)
+    stock(storage.first)
+  elseif step==19 then
+    check(storage.car_ammo.is_empty(),'dormant mobile consumer stays empty')
+    check(storage.car.teleport({20,0},storage.surface,true),'teleport into supplied surface')
+  elseif step==20 then
+    check(storage.car_ammo.get_item_count(AMMO)==10,'teleport event activates dormant consumer')
+    storage.car_ammo.clear()
+    check(storage.car.teleport({0,0},storage.dormant,true),'teleport out of supplied surface')
+  elseif step==21 then
+    check(storage.car_ammo.is_empty(),'teleport event removes active consumer')
+    storage.mobile_chest=create(storage.dormant,CHEST,5)
+    stock(storage.mobile_chest)
+  elseif step==22 then
+    check(storage.car_ammo.get_item_count(AMMO)==10,'first chest activates relocated consumer')
+    storage.car_ammo.clear()
+    storage.mobile_chest.destroy{raise_destroy=true}
+  elseif step==23 then
+    check(storage.car_ammo.is_empty(),'last chest deactivates relocated consumer')
+    local force=game.create_force('lifecycle-consumer-source')
+    storage.merge_car=create(storage.surface,'car',25,force)
+    storage.merge_ammo=storage.merge_car.get_inventory(defines.inventory.car_ammo)
+    game.merge_forces(force,'player')
+  elseif step==24 then
+    check(storage.merge_ammo.get_item_count(AMMO)==10,'force merge activates dormant consumer')
+    log('AUTO_LOADER_TEST SUCCESS no-chest load, build, clones, removal, death, merge, restock, clear, delete and mobile routing')
   end
 end)

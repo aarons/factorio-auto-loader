@@ -1,5 +1,12 @@
 # Refill benchmarks with 10,000 entities
 
+The [single-cursor follow-up](../documentation/BENCHMARK_RESULTS_2026-10-07_CURSOR.md)
+compares the simplified traversal with the preceding per-group-cursor snapshot.
+
+The [supplied-queue follow-up](../documentation/BENCHMARK_RESULTS_2026-10-07_QUEUES.md)
+compares v1.2.3 with the latest membership implementation, including full consumers
+and 1,000 linked chests per bucket.
+
 The [chest membership report](../documentation/BENCHMARK_RESULTS_2026-10-07_MEMBERSHIP.md)
 compares the new registry against the pre-change implementation, including true
 no-chest worlds and mixed supplied/unsupplied consumers.
@@ -174,8 +181,9 @@ python3 benchmarks/run.py --mode production --old HEAD --new WORKTREE \
 ```
 
 Use the pre-change commit instead of `HEAD` once these changes are committed.
-The additional scenarios require production mode so conditional `on_tick`
-registration and load restoration run normally:
+No-chest scenarios require production mode so conditional `on_tick`
+registration and load restoration run normally. Mixed supply also supports the
+equal-work callback run described below:
 
 - `no_chest`: 10,000 consumers at 9, across ten surfaces, with zero chests.
 - `mixed_supply`: five surfaces have a player-force chest and five have no
@@ -201,3 +209,49 @@ make that combined counter zero. Use per-run measurements and report this scope
 when discussing improvements. `production-results.json` contains script timing
 as well as whole-update timing. The player-only scenario and older graphical
 player tests cannot run if Steam fails to launch its graphical client.
+
+## Supplied queues and many linked chests
+
+Use `--old 7468a38 --new WORKTREE` to compare with the latest membership report.
+Both callback and production modes accept `--chests-per-bucket` (1–1,000,
+default 1). Additional chests share the same surface/force inventory; supply
+stock and consumer demand stay constant. For example:
+
+```sh
+python3 benchmarks/run.py --mode callback --old 7468a38 --new WORKTREE \
+  --output benchmarks/artifacts/many-chests \
+  --scenarios full partial no_supply --budgets 10 1000 \
+  --samples 6 --iterations 4 --chests-per-bucket 1000
+```
+
+The callback wrapper registers every chest, not just the inventory representative.
+With 1,000 chests per bucket this exercises 10,000 physical chests across ten
+pools. Fixture construction and stock resets remain outside the callback timer.
+
+Production `mixed_supply` now follows each implementation's queue: the old
+queue visits 1,000 global consumers per tick, while the supplied-only queue
+visits 1,000 of the 2,500 supplied consumers. The old implementation transfers
+250 items per tick on average; the new one transfers 1,000. This is a throughput
+comparison, not equal useful work per tick. Report both tick cost and transfers
+per tick (or cost per transfer). All other production scenarios keep equal work.
+The fixture validates the exact scheduled batch and debits after every tick,
+and rotates a separate check over all dormant consumers every ten ticks in
+both versions. These extra checks mean mixed-world absolute script times are
+not directly comparable with the earlier report's fixture. Source detection for
+this schedule is specific to `storage.consumer_buckets` and should be reviewed
+when benchmarking other implementations.
+
+A separate callback invocation with `--scenarios mixed_supply` compares equal
+useful work: each measured pass refills the same 2,500 supplied consumers once.
+The baseline needs 10,000 global visits; supplied queues need 2,500. Callback
+counts are recorded per version. At budget 1,000, the new version uses three
+callbacks (including 500 extra full-consumer checks); at budget 10 it uses 250,
+versus 1,000 for the baseline. Unsupplied inventories and item conservation are
+checked after every pass. This scenario must run separately because it changes
+the fixture topology. No-chest shutdown remains a production-mode measurement.
+
+To compare an uncommitted implementation captured by an earlier run, `--old` and
+`--new` also accept a source snapshot directory, such as
+`--old benchmarks/artifacts/supplied-queues-callback-final/sources/new`.
+The runner copies it into the new output directory and records its absolute path
+and all source hashes, just as it freezes Git revisions and `WORKTREE`.

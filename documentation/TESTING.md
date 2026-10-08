@@ -11,8 +11,8 @@ These exercise the production tick and refill functions with instrumented
 inventories. They check lazy supply access (including delayed/unarmed character
 slots), one snapshot per surface/force per tick, batched debits, conservation,
 shortages/restocking, exact quality and existing-stack preference, rejected and
-partial insertion/slot placement, locomotive slot limits, changing forces and
-surfaces, membership-gated missing/replaced chests, and cleanup of the old supply
+partial insertion/slot placement, locomotive slot limits, event-driven changes of force and
+surface, membership-gated missing/replaced chests, and cleanup of the old supply
 cache on upgrade.
 The mocks deliberately reject refunds and simulate partial API acceptance.
 The Lua tests exercise the registered init/load/configuration-change handlers.
@@ -25,7 +25,11 @@ including both active and disabled tick subscription restoration. Chest searches
 are prohibited outside bootstrap handlers. Registry cases cover duplicate build
 and removal events, invalid last members with surviving linked inventories,
 nil lookup caching, force merges, imports, surface cleanup/index reuse, legacy
-migration, and bounded visits to unsupplied/stale consumers.
+migration, dormant consumers consuming zero visits, active visit budgets,
+one-live-chest short-circuit validation, and full consumers avoiding location reads.
+Single-cursor checks cover removing groups before/after/at the current position,
+reactivation, shrinking groups, empty-to-active transitions, and loading midway
+through a group.
 The Python check verifies that both runners prefer standalone macOS Factorio
 over a `PATH` copy, honor explicit overrides, and handle missing installations.
 
@@ -51,10 +55,11 @@ python3 tests/run_factorio.py --test supply --upgrade-from HEAD
 ```
 
 The lifecycle fixture starts from a saved world with a registered consumer and
-no chests. Over 18 advancing ticks it exercises first construction, direct linked
+no chests. Over 24 advancing ticks it exercises first construction, direct linked
 inventory access, entity/area cloning, removal of one and the last chest (including
 silent destruction with delayed notifications), rebuilding, deconstruction marks,
-death, force merging, empty-chest restocking, surface clearing and deletion.
+death, force merging, empty-chest restocking, surface clearing and deletion, car teleportation into/out of dormant surfaces,
+and activation of a dormant consumer by force merging.
 The existing supply fixture covers loading with active membership.
 
 `--upgrade-from` creates the save using that Git revision's `control.lua`, then

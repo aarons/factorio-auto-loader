@@ -28,9 +28,11 @@ local script = {on_init=noop,on_load=noop,on_configuration_changed=noop,
   register_on_object_destroyed=function(entity) return entity.unit_number end}
 """
 SUFFIX = """
-return {tick=function() if tick_handler then tick_handler() end end,setup=function(entities,chests,budget)
+return {tick=function() if tick_handler then tick_handler() end end,
+  visits=function() return set_bucket_active and storage.active_consumer_count or #storage.order end,setup=function(entities,chests,budget)
   storage={fillables={},order={},cursor=1,reps={},representative_chests={},supply_candidates={},
-    chest_buckets={},chest_records={},chest_destructions={},chest_count=0}
+    chest_buckets={},chest_records={},chest_destructions={},chest_count=0,
+    consumer_buckets={},active_buckets={},bucket_cursor=1,traversal={bucket=1,consumer=1},active_consumer_count=0}
   tick_handler=on_tick
   settings.global['auto-loader-entities-per-tick'].value=budget
   build_caches()
@@ -94,10 +96,10 @@ def run(command, logfile, timeout):
 def summarize(root, config):
     log = (root/'callback.log').read_text()
     assert 'BENCH SUCCESS' in log and '\nDone.' in log, 'Incomplete callback run'
-    pattern = r'BENCH (\d+) (\d+) (\S+) (old|new) (\d+) (\d+) Duration: ([\d.]+)ms'
+    pattern = r'BENCH (\d+) (\d+) (\S+) (old|new) (\d+) (\d+) (\d+) Duration: ([\d.]+)ms'
     rows = [dict(sample=int(s),budget=int(b),scenario=c,version=v,iteration=int(i),
-                 transferred=int(t),sweep_ms=float(ms))
-            for s,b,c,v,i,t,ms in re.findall(pattern, log)]
+                 transferred=int(t),callbacks=int(calls),sweep_ms=float(ms))
+            for s,b,c,v,i,t,calls,ms in re.findall(pattern, log)]
     assert len(rows)==config['samples']*len(config['budgets'])*len(config['scenarios'])*2*config['iterations']
     (root/'callback-results.json').write_text(json.dumps(rows, indent=2)+'\n')
     lines = ['| Budget | Scenario | Old sweep ms | New sweep ms | Change | Old ms/callback | New ms/callback |',
@@ -117,8 +119,9 @@ def summarize(root, config):
                 median_sweep_ms=values,paired_change_percent=[(n/o-1)*100
                     for o,n in zip(sample_means['old'],sample_means['new'])]))
             old,new = values['old'],values['new']
-            calls = config['entities']/budget
-            lines.append(f'| {budget} | {scenario} | {old:.3f} | {new:.3f} | {(new/old-1)*100:+.1f}% | {old/calls:.4f} | {new/calls:.4f} |')
+            calls = {v:next(r['callbacks'] for r in rows if r['budget']==budget and
+                     r['scenario']==scenario and r['version']==v) for v in ['old','new']}
+            lines.append(f"| {budget} | {scenario} | {old:.3f} | {new:.3f} | {(new/old-1)*100:+.1f}% | {old/calls['old']:.4f} | {new/calls['new']:.4f} |")
     (root/'callback-results.md').write_text('\n'.join(lines)+'\n')
     (root/'callback-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print('\n'.join(lines))
@@ -177,7 +180,8 @@ def production(args,root,config,revisions,info,builtins,command):
                     dependencies=[info['name']])))
                 for source,dest in [('fixture.lua','fixture.lua'),('production.lua','control.lua')]:
                     shutil.copy2(REPO/'benchmarks/factorio'/source,fixture/dest)
-                (fixture/'config.lua').write_text('return '+lua(case_config)+'\n')
+                version_config = dict(case_config, supplied_queue='storage.consumer_buckets' in (rev/'control.lua').read_text())
+                (fixture/'config.lua').write_text('return '+lua(version_config)+'\n')
                 (fixture/'settings-final-fixes.lua').write_text(
                     f"data.raw['int-setting']['auto-loader-entities-per-tick'].default_value = {case_budget}\n")
                 (mods/'mod-list.json').write_text(json.dumps({'mods':[dict(name=n,enabled=True)
@@ -252,9 +256,10 @@ def main():
     parser.add_argument('--factorio', default=os.environ.get('AUTO_FACTORIO'),
                         help='Executable (default: /Applications/factorio.app, then PATH; AUTO_FACTORIO overrides)')
     parser.add_argument('--data', default=os.environ.get('AUTO_FACTORIO_DATA'))
-    parser.add_argument('--old', default=OLD, help='Git revision or WORKTREE')
-    parser.add_argument('--new', default=NEW, help='Git revision or WORKTREE')
+    parser.add_argument('--old', default=OLD, help='Git revision, source snapshot directory, or WORKTREE')
+    parser.add_argument('--new', default=NEW, help='Git revision, source snapshot directory, or WORKTREE')
     parser.add_argument('--entities', type=int, default=10000, help='Fixed fixture size: 10000')
+    parser.add_argument('--chests-per-bucket', type=int, default=1, choices=range(1,1001), metavar='1..1000')
     parser.add_argument('--samples', type=int, default=6)
     parser.add_argument('--iterations', type=int, default=4)
     parser.add_argument('--budgets', type=int, nargs='+', default=[10,100,1000,10000])
@@ -268,8 +273,11 @@ def main():
         parser.error('This fixture uses exactly 10,000 entities; budgets must divide 10,000 and be in 1..10,000')
     if args.scenarios is None:
         args.scenarios = ['full','partial','empty'] if args.mode=='production' else SCENARIOS[:-3]
-    if args.mode == 'callback' and any(s in ['no_chest','mixed_supply','player_no_chest'] for s in args.scenarios):
-        parser.error('Membership scenarios require production mode to measure actual event scheduling')
+    if args.mode == 'callback':
+        if any(s in ['no_chest','player_no_chest'] for s in args.scenarios):
+            parser.error('No-chest scenarios require production mode to measure event scheduling')
+        if 'mixed_supply' in args.scenarios and args.scenarios != ['mixed_supply']:
+            parser.error('Callback mixed_supply requires its own run because it changes world topology')
     if args.samples<1 or args.iterations<1:
         parser.error('Samples and iterations must be positive')
     executable = find_factorio(args.factorio)
@@ -284,8 +292,12 @@ def main():
     (root/'user').mkdir()
     shutil.copy2(Path(__file__),root/'runner-snapshot.py')
     config = dict(entities=args.entities,samples=args.samples,iterations=args.iterations,
-                  budgets=args.budgets,scenarios=args.scenarios,ticks=args.ticks)
-    revisions = {label:rev if rev=='WORKTREE' else git('rev-parse',rev).decode().strip()
+                  budgets=args.budgets,scenarios=args.scenarios,ticks=args.ticks,
+                  chests_per_bucket=args.chests_per_bucket)
+    if args.mode == 'callback' and args.scenarios == ['mixed_supply']:
+        config['scenario'] = 'mixed_supply'
+    revisions = {label:rev if rev=='WORKTREE' else (Path(rev).resolve() if Path(rev).is_dir()
+                 else git('rev-parse',rev).decode().strip())
                  for label,rev in [('old',args.old),('new',args.new)]}
     snapshots = {}
     for label,rev in revisions.items():
@@ -293,7 +305,8 @@ def main():
         copy_revision(rev,snapshots[label])
     info = json.loads((snapshots['new']/'info.json').read_text())
     builtins = sorted(json.loads(p.read_text())['name'] for p in data.glob('*/info.json') if p.parent.name!='core')
-    metadata = dict(config=config,revisions=revisions,sha256={},builtins=builtins,
+    metadata = dict(config=config,revisions={label:str(rev) for label,rev in revisions.items()},
+                    sha256={},builtins=builtins,
                     executable=str(executable),data=str(data),
                     factorio_version=subprocess.check_output([str(executable),'--version'],text=True),
                     created_at=time.strftime('%Y-%m-%dT%H:%M:%S%z'))

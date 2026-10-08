@@ -11,9 +11,10 @@ script.on_init(function()
         local scenario = config.scenarios[sample%2==1 and si or #config.scenarios-si+1]
         for _,version in ipairs(sample%2==1 and {'old','new'} or {'new','old'}) do
           local engine = engines[version]
-          engine.setup(state.entities,state.chests,budget)
+          engine.setup(state.entities,state.members,budget)
+          local callbacks=math.ceil(engine.visits()/budget)
           local function sweep()
-            for _=1,config.entities/budget do engine.tick() end
+            for _=1,callbacks do engine.tick() end
           end
           fixture.supply(state,'empty')
           fixture.reset(state,'empty')
@@ -27,7 +28,7 @@ script.on_init(function()
             timer.stop()
             local transferred = fixture.validate(state,scenario)
             log({'','BENCH ',sample,' ',budget,' ',scenario,' ',version,' ',iteration,
-              ' ',transferred,' ',timer})
+              ' ',transferred,' ',callbacks,' ',timer})
           end
         end
       end

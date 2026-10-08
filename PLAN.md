@@ -13,24 +13,20 @@ examined, so its specific reported cost remains unverified.
 
 The remaining priorities in [control.lua](control.lua) are below.
 
-## 1. Scheduling consumers without a supply chest
+## Completed: supplied scheduling and demand gating
 
-Consumers on all surfaces and forces still share one global round-robin queue.
-When at least one chest exists, each visited consumer's current surface and force
-are checked for supply membership. Unsupplied consumers skip inventory checks,
-but their visits still consume the per-tick budget and delay supplied consumers.
+Version 1.2.3 replaces the global queue with surface/force buckets; only buckets
+with chests are swept. Dormant consumers retain registration without consuming
+refill slots. Chest transitions activate/deactivate buckets, and player routing,
+raised teleports, and force merges move consumers between them. Silent routing
+changes by other mods require events, as described in [EVENTS.md](documentation/EVENTS.md).
 
-Replace the global processing queue with scheduling for supplied surface/force
-buckets. Keep unsupplied consumers registered so building a first chest does not
-require rediscovery. Activation and deactivation must handle chest lifecycle
-changes, and consumer routing must remain correct when entities change surfaces
-or forces. Preserve fairness and a bounded amount of work per tick, including
-cleanup of stale entries.
-
-An absent chest and an empty chest are different cases: an empty chest can be
-restocked without a build event and must remain scheduled. Benchmark mixed
-supplied/unsupplied worlds and already-full consumers; the current early gate
-adds overhead for consumers that would otherwise return before looking up supply.
+Full consumers now return before location and supply checks. Membership
+validation prunes invalid references until finding one live chest. The
+[follow-up report](documentation/BENCHMARK_RESULTS_2026-10-07_QUEUES.md) compares
+against v1.2.2, including many linked chests per bucket. The subsequent
+[single-cursor comparison](documentation/BENCHMARK_RESULTS_2026-10-07_CURSOR.md)
+covers simplifying traversal while keeping the active-group array.
 
 ## 2. Supply snapshots and candidate scans
 

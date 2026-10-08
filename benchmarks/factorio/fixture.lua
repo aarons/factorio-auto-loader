@@ -6,10 +6,10 @@ function M.create(raise_built)
   local surface = game.surfaces[1]
   local tiles = {}
   for x=-8,404 do
-    for y=-8,math.ceil(config.entities/1000)*4+4 do tiles[#tiles+1] = {name='grass-1', position={x,y}} end
+    for y=-8,math.max(44,48+math.ceil(config.chests_per_bucket/100)*3) do tiles[#tiles+1] = {name='grass-1', position={x,y}} end
   end
   surface.set_tiles(tiles)
-  local state = {entities={}, inventories={}, chests={}, supplies={}, surfaces={}, supplied={}}
+  local state = {entities={}, inventories={}, chests={}, members={}, supplies={}, surfaces={}, supplied={}}
   local absent = game.forces["bench-absent"] or game.create_force("bench-absent")
   absent.set_friend(game.forces.player,true)
   game.forces.player.set_friend(absent,true)
@@ -28,6 +28,13 @@ function M.create(raise_built)
       state.chests[i].link_id = s.index
       state.supplies[i] = state.chests[i].get_inventory(defines.inventory.chest)
       assert(#state.supplies[i] == 48, 'Expected default 48-slot chest')
+      state.members[#state.members+1] = state.chests[i]
+      for j=2,config.chests_per_bucket do
+        local chest=assert(s.create_entity{name='auto-loader-chest',
+          position={((j-2)%100)*3,48+math.floor((j-2)/100)*3},force='player',raise_built=raise_built})
+        chest.link_id=s.index
+        state.members[#state.members+1]=chest
+      end
     end
   end
   if config.scenario=='player_no_chest' then
@@ -104,14 +111,17 @@ function M.validate(state, scenario)
       local offset = (i-1)%(config.entities/10)
       expected = offset<config.entities/20 and 10 or 9
     end
+    if not state.supplied[i] then expected=M.initial(scenario,i) end
     assert(count==expected, scenario..' entity '..i..': expected '..expected..', got '..count)
     transferred[kind] = transferred[kind]+count-M.initial(scenario,i)
   end
   for kind,name in ipairs({'firearm-magazine','coal'}) do
-    local remaining = 0
-    for _,inv in pairs(state.supplies) do remaining=remaining+inv.get_item_count(name) end
+    local remaining, pools = 0, 0
+    for _,inv in pairs(state.supplies) do
+      remaining=remaining+inv.get_item_count(name); pools=pools+1
+    end
     local before = scenario=='no_supply' and 0 or
-      (scenario=='depleted' and config.entities/4 or config.entities*5)
+      (scenario=='depleted' and config.entities/40*pools or config.entities/2*pools)
     assert(remaining+transferred[kind]==before, scenario..': conservation failed for '..name)
   end
   return transferred[1]+transferred[2]

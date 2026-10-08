@@ -8,6 +8,12 @@ script.on_init(function()
   end
   assert(settings.global['auto-loader-entities-per-tick'].value==config.budget)
   storage.state = fixture.create(true)
+  storage.schedule = {}
+  for i=1,config.entities do
+    if config.scenario~='mixed_supply' or not config.supplied_queue or storage.state.supplied[i] then
+      storage.schedule[#storage.schedule+1]=i
+    end
+  end
   storage.cursor = 1
   storage.sweeps = 0
   storage.updates = 0
@@ -33,9 +39,13 @@ end)
 script.on_event(defines.events.on_tick,function()
   local state = storage.state
   if config.scenario=="player_no_chest" and not state.entities[1] then return end
-  local first,last = storage.cursor,storage.cursor+config.budget-1
+  local schedule = storage.schedule
+  local visits = math.min(config.budget,#schedule)
+  local visited = {}
   local charged = {}
-  for i=first,last do
+  for offset=0,visits-1 do
+    local i=schedule[(storage.cursor+offset-1)%#schedule+1]
+    visited[#visited+1]=i
     local name = i%2==1 and 'firearm-magazine' or 'coal'
     local count = state.inventories[i].get_item_count(name)
     local expected = state.supplied[i] and config.scenario~='no_supply' and 10 or fixture.initial(config.scenario,i)
@@ -54,9 +64,20 @@ script.on_event(defines.events.on_tick,function()
       if count>0 then assert(inventory.insert{name=name,count=count}==count) end
     end
   end
-  fixture.reset(state,config.scenario,first,last)
-  storage.cursor = last==config.entities and 1 or last+1
-  if storage.cursor==1 then storage.sweeps=storage.sweeps+1 end
+  for _,i in ipairs(visited) do fixture.reset(state,config.scenario,i,i) end
+  -- Equal extra validation in both variants, including all dormant consumers
+  -- over ten ticks. This is outside Auto-Loader but inside scriptUpdate.
+  if config.scenario=='mixed_supply' then
+    local first=(storage.updates%10)*(config.entities/10)+1
+    for i=first,first+config.entities/10-1 do
+      if not state.supplied[i] then
+        assert(state.inventories[i].get_item_count(i%2==1 and 'firearm-magazine' or 'coal')==9,
+          'PRODUCTION dormant consumer changed')
+      end
+    end
+  end
+  storage.sweeps = storage.sweeps + math.floor((storage.cursor-1+visits)/#schedule)
+  storage.cursor = (storage.cursor+visits-1)%#schedule+1
   storage.updates = storage.updates+1
   if storage.updates==config.actual_ticks then
     log('PRODUCTION SUCCESS sweeps='..storage.sweeps..' entities='..config.entities)

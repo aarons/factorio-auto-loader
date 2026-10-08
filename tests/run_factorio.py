@@ -102,7 +102,7 @@ def main():
     if args.test != 'player_ammo':
         with (root / 'test.log').open('w') as output:
             subprocess.run(command + ['--benchmark',str(root/'test.zip'),
-                '--benchmark-ticks',str(18 if args.test == 'lifecycle' else 3),'--benchmark-runs','1'], stdout=output,
+                '--benchmark-ticks',str(24 if args.test == 'lifecycle' else 3),'--benchmark-runs','1'], stdout=output,
                 stderr=subprocess.STDOUT, check=True, timeout=args.timeout)
         log = (root/'test.log').read_text()
         if 'AUTO_LOADER_TEST SUCCESS' not in log:

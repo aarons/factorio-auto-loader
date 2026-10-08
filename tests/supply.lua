@@ -45,7 +45,7 @@ local source = file:read('*a'); file:close()
 local supply_functions = assert(load(source .. [[
 return { fill_inventory = fill_inventory, fill_slot = fill_slot, get_pool = get_pool,
   fill_character_ammo = fill_character_ammo, debit_pools = debit_pools, tick = on_tick,
-  fill_entity = fill_entity, initialize = initialize }
+  fill_entity = fill_entity, initialize = initialize, register = register_fillable }
 ]]))()
 local ammo = { bullet = {'bullet'}, piercing = {'bullet'}, shell = {'shotgun'} }
 local function assert_equal(actual, expected)
@@ -140,6 +140,12 @@ end
 local function entity(surface_index, force_index)
   return {valid=true, surface=game.surfaces[surface_index or 1], force=forces[force_index or 1],
     to_be_deconstructed=function() return false end}
+end
+local function register(who, unit)
+  who.unit_number = unit
+  who.type = 'ammo-turret'
+  who.prototype = {automated_ammo_count=10}
+  supply_functions.register(who)
 end
 local consumer = entity()
 -- Exercise the registered lifecycle handlers, not hand-populated caches. Loading
@@ -360,7 +366,6 @@ assert_equal(stock['multi/rare'],12); assert_equal(stock['coal/normal'],20)
 print('Fuel categories and init/load checks passed')
 
 -- Real on_tick debits independently across two surfaces and two forces.
-storage.order, storage.fillables, storage.cursor = {}, {}, 1
 local inventories, stocks, stacks = {}, {}, {}
 for surface_index=1,2 do
   for force_index=1,2 do
@@ -371,8 +376,7 @@ for surface_index=1,2 do
     local inventory=destination(stacks[i],100)
     local who=entity(surface_index,force_index)
     who.get_inventory=function() return inventory end
-    storage.order[i]=i
-    storage.fillables[i]={entity=who,ammo_define=4,ammo_target=10}
+    register(who,i)
   end
 end
 supply_functions.tick()
@@ -384,9 +388,10 @@ end
 stocks[4]['bullet/normal']=10
 storage.fillables[1].entity.force=forces[2]
 storage.fillables[1].entity.surface=game.surfaces[2]
+handlers.script_raised_teleported{entity=storage.fillables[1].entity}
 supply_functions.tick()
-assert_equal(stacks[1].count,10); assert_equal(stocks[4]['bullet/normal'],0)
-assert_equal(stacks[4].count,5)
+assert_equal(stacks[1].count,5); assert_equal(stocks[4]['bullet/normal'],0)
+assert_equal(stacks[4].count,10)
 
 -- Missing membership never searches or borrows another force's linked supply.
 pools={}; local absent=entity(1,3); local before=game.surfaces[1].searches
@@ -488,13 +493,13 @@ refill(1000)
 assert_equal(supply_inventory.reads,0)
 
 -- Upgrade initialization drops stale persistent supply identities but retains
--- registry/cursor and player delay state; on_load only reads storage.
-local order, fillables = storage.order, storage.fillables
+-- registry and player delay state; on_load only reads storage.
+local fillables = storage.fillables
 fillables[1].ammo_refill_after=9000
 storage.supply_candidates={stale=true}
 handlers.configuration_changed()
 assert_equal(storage.supply_candidates,nil)
-assert_equal(storage.order,order); assert_equal(storage.fillables,fillables)
+assert_equal(storage.order,nil); assert_equal(storage.fillables,fillables)
 assert_equal(fillables[1].ammo_refill_after,9000)
 print('Demand gating and upgrade checks passed')
 
@@ -572,38 +577,221 @@ storage.representative_chests={stale=true}
 handlers.configuration_changed()
 assert_equal(storage.representative_chests,nil)
 assert_equal(storage.chest_count,1)
--- Supply gating precedes inventories, burner and player settings; visits stay bounded.
-storage.order,storage.fillables,storage.cursor={},{},1
+-- Dormant consumers occupy no active queue slots and never inspect inventories.
 settings.global['auto-loader-entities-per-tick'].value=2
 for i=1,6 do
   local who=entity(2,3)
   who.get_inventory=function() error('Unsupplied inventory inspected') end
-  who.get_fuel_inventory=function() error('Unsupplied fuel inspected') end
   who.to_be_deconstructed=function() error('Unsupplied consumer inspected') end
-  storage.order[i]=i
-  storage.fillables[i]={entity=who,ammo_define=4,fuel=true,type='character'}
+  register(who,i)
 end
+assert_equal(storage.active_consumer_count,0)
 local search_count=game.surfaces[2].searches
 handlers.on_tick()
-assert_equal(storage.cursor,3)
+assert_equal(storage.active_consumer_count,0)
 assert_equal(game.surfaces[2].searches,search_count)
-handlers.on_tick(); assert_equal(storage.cursor,5)
--- Stale consumer slots also consume the visit budget.
-storage.cursor=1
-storage.fillables[1]=nil; storage.fillables[2]=nil
-handlers.on_tick(); assert_equal(storage.cursor,3)
+-- Destruction removes inactive entries immediately.
+handlers.on_object_destroyed{useful_id=1}
+assert_equal(#storage.consumer_buckets[2][3].order,5)
 clear_membership()
-print('Chest lifecycle, load restoration, no-search and bounded scheduling checks passed')
+print('Chest lifecycle, load restoration and dormant queue checks passed')
 
--- The real sweep's eligibility ledger must leave full consumers demand-driven.
-local lazy_inventory=add_chest(1,1,{['bullet/normal']=50})
+-- Full consumers never read location, validate chests, or resolve supply.
+local lazy_inventory,chest=add_chest(1,1,{['bullet/normal']=50})
 local full=entity()
 local full_inventory=destination(slot('bullet',10),100)
 full.get_inventory=function() return full_inventory end
-storage.order,storage.fillables,storage.cursor={1},{[1]={entity=full,ammo_define=4,ammo_target=10}},1
+register(full,100)
 local lookups=forces[1].lookups
+full.surface=nil; full.force=nil
 handlers.on_tick()
 assert_equal(lazy_inventory.reads,0)
 assert_equal(forces[1].lookups,lookups)
+full.surface=game.surfaces[1]; full.force=forces[1]
 clear_membership()
 print('Supplied full-consumer demand gating passed')
+
+-- A budget of two services two supplied consumers despite many dormant ones.
+local supply_inv=add_chest(1,1,{['bullet/normal']=100})
+local active_stacks={}
+for i=1,3 do
+  local who=entity()
+  active_stacks[i]=slot('bullet',9)
+  local inv=destination(active_stacks[i],100)
+  who.get_inventory=function() return inv end
+  register(who,200+i)
+end
+for i=1,100 do
+  local who=entity(2,3)
+  who.get_inventory=function() error('Dormant consumer inspected') end
+  register(who,300+i)
+end
+assert_equal(storage.active_consumer_count,3)
+handlers.on_tick()
+assert_equal(active_stacks[1].count,10); assert_equal(active_stacks[2].count,10)
+assert_equal(active_stacks[3].count,9)
+handlers.on_tick(); assert_equal(active_stacks[3].count,10)
+-- Activation uses existing registry; relocation out/in changes active membership.
+local moving=storage.fillables[201].entity
+moving.surface=game.surfaces[2]
+handlers.script_raised_teleported{entity=moving}
+assert_equal(storage.active_consumer_count,2)
+moving.surface=game.surfaces[1]
+handlers.script_raised_teleported{entity=moving}
+assert_equal(storage.active_consumer_count,3)
+-- Removing a dead active entry never reads its invalid entity properties.
+local dead=storage.fillables[202].entity
+dead.valid=false; dead.unit_number=nil
+handlers.on_object_destroyed{useful_id=202}
+assert_equal(storage.active_consumer_count,2)
+clear_membership()
+
+-- A silently destroyed last chest deactivates its whole queue mid-sweep.
+local _,expired=add_chest(1,1,{['bullet/normal']=100})
+add_chest(2,1,{['bullet/normal']=100})
+local pending={}
+for i=1,4 do
+  local who=entity(i<=2 and 1 or 2,1)
+  pending[i]=slot()
+  local inv=destination(pending[i],100)
+  who.get_inventory=function() return inv end
+  register(who,700+i)
+end
+expired.valid=false
+handlers.on_tick()
+assert_equal(pending[1].count,0); assert_equal(pending[2].count,0)
+assert_equal(pending[3].count,10); assert_equal(pending[4].count,0)
+assert_equal(storage.active_consumer_count,2)
+handlers.on_tick(); assert_equal(pending[4].count,10)
+-- Sweep cleanup also handles consumers before their destruction event arrives.
+local stale=storage.fillables[703].entity
+stale.valid=false; stale.unit_number=nil
+handlers.on_tick()
+assert_equal(storage.fillables[703],nil)
+assert_equal(storage.active_consumer_count,1)
+clear_membership()
+
+-- Player routing events work while the consumer is dormant.
+add_chest(1,1,{['bullet/normal']=100})
+local traveler=entity(2,1)
+traveler.get_inventory=function() return destination(slot('bullet',10),100) end
+register(traveler,500)
+game.get_player=function(index) assert_equal(index,1); return {character=traveler} end
+assert_equal(storage.active_consumer_count,0)
+traveler.surface=game.surfaces[1]
+handlers.on_player_changed_surface{player_index=1,surface_index=2}
+assert_equal(storage.active_consumer_count,1)
+traveler.force=forces[2]
+handlers.on_player_changed_force{player_index=1,force=forces[1]}
+assert_equal(storage.active_consumer_count,0)
+add_chest(1,2,{})
+assert_equal(storage.active_consumer_count,1)
+clear_membership()
+
+-- Differently sized buckets each get a complete pass without starvation.
+add_chest(1,1,{})
+add_chest(2,1,{})
+local visits={0,0,0,0}
+for i=1,4 do
+  local who=entity(i==4 and 2 or 1,1)
+  local inv=destination(slot('bullet',10),100)
+  who.get_inventory=function() visits[i]=visits[i]+1; return inv end
+  register(who,600+i)
+end
+handlers.on_tick(); handlers.on_tick()
+for i=1,4 do assert_equal(visits[i],1) end
+-- Save/load preserves the shared traversal position without writing storage.
+load_readonly()
+handlers.on_tick(); handlers.on_tick()
+for i=1,4 do assert_equal(visits[i],2) end
+clear_membership()
+print('Player routing, multi-bucket fairness and active save/load checks passed')
+
+-- Many linked chests: eligibility stops after exactly one live validity read.
+local reads=0
+for i=1,1000 do
+  local _,member=add_chest(1,1,{})
+  member.valid=nil
+  setmetatable(member,{__index=function(_,key)
+    if key=='valid' then reads=reads+1; return true end
+  end})
+end
+assert(supply_functions.get_pool(1,forces[1],{}))
+assert_equal(reads,1)
+-- Invalid prefix is pruned before stopping at the next live member.
+local first_unit=next(storage.chest_buckets[1][1].members)
+storage.chest_records[first_unit].entity.valid=false
+reads=0
+assert(supply_functions.get_pool(1,forces[1],{}))
+assert_equal(storage.chest_count,999)
+assert_equal(reads,1)
+-- Prune all members when none survive.
+for _,record in pairs(storage.chest_records) do record.entity.valid=false end
+assert_equal(supply_functions.get_pool(1,forces[1],{}),nil)
+assert_equal(storage.chest_count,0)
+assert_equal(storage.active_consumer_count,0)
+assert_equal(handlers.on_tick,nil)
+print('Active-only budgets, routing, destruction and short-circuit membership passed')
+
+-- One traversal position survives changes elsewhere in the active-group array.
+do
+  local seen, group_chests
+  local function setup()
+    clear_membership()
+    seen,group_chests={},{}
+    settings.global['auto-loader-entities-per-tick'].value=1
+    for group,key in ipairs({{1,1},{2,1},{1,2}}) do
+      local _,chest=add_chest(key[1],key[2],{})
+      group_chests[group]=chest
+      for i=1,3 do
+        local who=entity(key[1],key[2])
+        local inv=destination(slot('bullet',10),100)
+        who.get_inventory=function() seen[#seen+1]=group..':'..i; return inv end
+        register(who,100000+group*100+i)
+      end
+    end
+  end
+  local function visit(expected)
+    handlers.on_tick()
+    assert_equal(seen[#seen],expected)
+  end
+  local function remove_group(group)
+    handlers.on_player_mined_entity{entity=group_chests[group]}
+  end
+
+  setup()
+  visit('1:1'); visit('1:2'); visit('1:3'); visit('2:1')
+  remove_group(1) -- shift the current group left without losing its position
+  visit('2:2')
+  remove_group(3) -- removing a later group must not reset the current consumer
+  visit('2:3'); visit('2:1')
+
+  setup()
+  visit('1:1')
+  load_readonly() -- resume in the middle of a group, not at a pass boundary
+  visit('1:2')
+  remove_group(1) -- the successor must start at its first consumer
+  visit('2:1')
+  add_chest(1,1,{}) -- a reactivated group starts from the beginning
+  visit('2:2'); visit('2:3')
+  visit('3:1'); visit('3:2'); visit('3:3'); visit('1:1')
+
+  setup()
+  visit('1:1'); visit('1:2'); visit('1:3')
+  visit('2:1'); visit('2:2'); visit('2:3'); visit('3:1')
+  remove_group(3) -- removing the current tail group wraps to the first
+  visit('1:1')
+  handlers.on_object_destroyed{useful_id=100203} -- shorten a noncurrent group
+  visit('1:2')
+  handlers.on_object_destroyed{useful_id=100103} -- remove the pending tail entry
+  visit('1:1'); visit('1:2'); visit('2:1')
+  clear_membership()
+  add_chest(1,1,{}) -- empty -> active resets traversal without a special scan
+  local who=entity()
+  local inv=destination(slot('bullet',10),100)
+  who.get_inventory=function() seen[#seen+1]='new'; return inv end
+  register(who,101000)
+  visit('new')
+  clear_membership()
+end
+print('Single-cursor removal, reactivation, shrinking and partial-save checks passed')
