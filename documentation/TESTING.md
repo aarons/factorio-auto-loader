@@ -18,8 +18,9 @@ The mocks deliberately reject refunds and simulate partial API acceptance.
 The Lua tests exercise the registered init/load/configuration-change handlers.
 They model Factorio 2.1.20's plural fuel categories and reject the removed
 singular property. Fuel checks cover matching any category, incompatible
-burners, empty and occupied locomotive slots, existing-stack preference, quality,
-and conservation of supply. Loading is tested with `game` unavailable and
+burners, zero-slot fuel inventories that throw on indexing, empty and occupied
+locomotive slots, existing-stack preference, quality, and conservation of supply.
+Loading is tested with `game` unavailable and
 recursively read-only storage,
 including both active and disabled tick subscription restoration. Chest searches
 are prohibited outside bootstrap handlers. Registry cases cover duplicate build

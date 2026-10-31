@@ -495,7 +495,8 @@ local function fill_fuel(entry, entity, pools)
   local inventory = entity.get_fuel_inventory()
   local burner = entity.burner
   local accepted_categories = burner and burner.fuel_categories
-  if not (inventory and accepted_categories) then return end
+  -- Script-powered burners can expose a fuel inventory with zero slots.
+  if not (inventory and accepted_categories) or #inventory == 0 then return end
   if entry.is_locomotive then
     -- Trains keep one full stack, without hoarding across all three slots.
     fill_slot(inventory[1], accepted_categories, math.huge, entity, pools, "fuels", ITEM_FUEL)

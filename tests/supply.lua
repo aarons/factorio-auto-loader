@@ -296,6 +296,24 @@ item_stack=slot('bullet',1,'rare'); fill(pools,destination(item_stack,100))
 supply_functions.debit_pools(pools)
 assert_equal(item_stack.count,10); assert_equal(stock['bullet/rare'],1)
 
+-- A burner can expose a fuel inventory with no slots. Like LuaInventory, this
+-- mock throws on out-of-bounds indexing instead of returning nil.
+for _, is_train in ipairs({true, false}) do
+  stock = {['coal/normal']=70}; supply_inventory = add_chest(1,1,stock); pools = {}
+  local empty_inventory = setmetatable({}, {__index=function(_, key)
+    if type(key) == 'number' then error('Index out of inventory bounds.') end
+    error('Zero-slot fuel inventory must not be used')
+  end})
+  local burner = entity()
+  burner.burner = {fuel_categories={chemical=true}}
+  burner.get_fuel_inventory = function() return empty_inventory end
+  supply_functions.fill_entity({entity=burner,fuel=true,is_locomotive=is_train},pools)
+  supply_functions.debit_pools(pools)
+  assert_equal(next(pools),nil)
+  assert_equal(supply_inventory.reads,0); assert_equal(supply_inventory.removes,0)
+  assert_equal(stock['coal/normal'],70)
+end
+
 -- Locomotives fill only slot 1 to its stack cap; occupied qualities cannot switch.
 stock = {['coal/normal']=70, ['coal/rare']=2}; supply_inventory = add_chest(1,1,stock); pools = {}
 local train = entity()

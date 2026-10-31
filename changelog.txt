@@ -1,4 +1,11 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.2.4
+Date: 2026-10-31
+  Bugfixes:
+    - Fixed a crash when placing locomotives with zero-slot fuel inventories, reported with ElectricTrainFix.
+      Auto-Loader now skips fuel inventories with no slots.
+      Thanks R3CONN3R for reporting this!
+---------------------------------------------------------------------------------------------------
 Version: 1.2.3
 Date: 2026-10-07
   Optimizations:
